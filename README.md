@@ -25,6 +25,9 @@ driven remotely over obs-websocket.
 
 OBS Studio 31.1 or later. (Looking Glass uses the canvas API introduced in that release.)
 
+On Linux, multiview windows work under X11 and XWayland. Running OBS as a native Wayland
+client needs Qt 6.9 or later; with older Qt, start OBS with `QT_QPA_PLATFORM=xcb`.
+
 ## Getting Started
 
 Everything lives under **Tools ▸ Looking Glass**.
@@ -77,6 +80,9 @@ Each cell is assigned one widget type from the **Set Widget** dialog:
 Content is scaled to fit its cell with the aspect ratio preserved and centered, so mixed
 cell shapes never distort the picture.
 
+`Scene` and `Source` cells follow their scene or source when it is renamed in OBS, and
+pick it up again if it is deleted and later recreated under the same name.
+
 Two per-cell toggles sit alongside the type:
 
 * **Draw Safe Areas** overlays broadcast safe regions on the cell content — action safe, title safe, 4:3 inner safe, and a center crosshair.
@@ -87,7 +93,7 @@ Two per-cell toggles sit alongside the type:
 Every cell has its own label settings:
 
 * **Show Label** toggles it entirely.
-* **Custom Text** overrides the label; leave it empty to use the source or scene name automatically.
+* **Custom Text** overrides the label; leave it empty to use the source or scene name automatically (it updates when the scene or source is renamed).
 * **Font** picks family, style, and point size. Labels are drawn as OBS overlays, so the size scales with the cell rather than staying fixed in screen pixels.
 * **Background** sets the label backing color, including opacity — the picker shows the resulting hex value and opacity percentage.
 * **Vertical** and **Horizontal** place the label in any of nine positions within the cell.
@@ -117,8 +123,8 @@ the current grid, so you are asked to confirm first.
 
 **Tools ▸ Looking Glass ▸ Manage Templates…** renames, edits, and deletes your templates.
 The built-in **Default (OBS-style)** template is always present and cannot be modified —
-it is regenerated on each launch so its auto-filled scene cells match your current
-collection.
+it is generated each time it is used, so its auto-filled scene cells always match the
+current collection.
 
 ## Window Controls
 
@@ -139,7 +145,9 @@ window is fullscreen.
 
 Window state is saved as you move and resize. When you switch scene collections or restart
 OBS, the multiviews that were open reopen where you left them, on the monitor they were on,
-fullscreen if they were fullscreen.
+fullscreen if they were fullscreen. Monitors are remembered by name, so unplugging or
+reordering displays does not send a window to the wrong one; a window whose monitor is gone
+reopens centered on the primary display.
 
 ## Controlling Multiviews from obs-websocket
 
@@ -185,7 +193,12 @@ Looking Glass logs a note and everything else works as normal.
 
 ## Where Settings Are Stored
 
-Multiview layouts are stored per scene collection; templates are global.
+Multiview layouts, and which windows are open and where, are saved **inside the scene
+collection** itself. They follow the collection when it is renamed, duplicated, exported,
+or imported, and OBS's own scene collection backups cover them.
+
+Templates are global, shared by every scene collection, and live in `templates.json` in the
+plugin's config directory:
 
 | Platform | Path |
 |---|---|
@@ -193,8 +206,12 @@ Multiview layouts are stored per scene collection; templates are global.
 | macOS | `~/Library/Application Support/obs-studio/plugin_config/looking-glass/` |
 | Linux | `~/.config/obs-studio/plugin_config/looking-glass/` |
 
-Inside that directory, `multiviews/<Scene Collection>.json` holds the layouts for one
-collection, and `templates.json` holds your templates.
+### Upgrading from 1.0
+
+Version 1.0 kept each collection's multiviews in `multiviews/<Scene Collection>.json` in
+the directory above. The first time a collection without embedded multiview data loads, its
+file is imported into the collection automatically. The old files are left untouched, so
+downgrading still finds them.
 
 ## Building
 
@@ -225,12 +242,26 @@ Suggested reading from the plugin template wiki:
 
 | Path | Contents |
 |---|---|
-| `src/core/` | Layout data model and per-collection/template persistence |
-| `src/ui/` | Tools menu, grid editor, dialogs, and the multiview window |
-| `src/render/` | Per-cell OBS display rendering, labels, safe areas, status borders |
+| `src/core/` | Layout data model and JSON serialization, grid operations (`GridModel`), and persistence (`ConfigManager`) |
+| `src/ui/` | Tools menu, grid editor, dialogs, and the multiview window with its OBS display |
+| `src/render/` | Grid rendering into a single OBS display per window, labels, safe areas, status borders |
 | `src/api/` | obs-websocket vendor requests |
 | `deps/` | Vendored third-party headers (`obs-websocket-api.h`) |
 | `data/locale/` | Translatable UI strings |
+| `tests/` | Unit tests for the layout model, serialization, and grid operations |
+
+### Unit Tests
+
+The data model, its serialization, and the grid operations do not depend on libobs, so
+their tests build on their own with nothing but Qt 6:
+
+```sh
+cmake -S tests -B build_tests
+cmake --build build_tests
+ctest --test-dir build_tests --output-on-failure
+```
+
+CI runs them on every pull request and push.
 
 ### Code Formatting
 
@@ -247,6 +278,7 @@ GitHub Actions workflows are available for the following repository actions:
 * `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
 * `build-project`: Builds the actual project and is triggered by other workflows.
 * `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
+* `unit-tests`: Builds and runs the unit tests in `tests/` and is triggered by other workflows.
 
 The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
 

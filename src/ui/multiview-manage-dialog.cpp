@@ -75,27 +75,29 @@ ManageMultiviewsDialog::ManageMultiviewsDialog(QWidget *parent) : QDialog(parent
 	connect(cm, &ConfigManager::multiviewAdded, this, &ManageMultiviewsDialog::refreshList);
 	connect(cm, &ConfigManager::multiviewRemoved, this, &ManageMultiviewsDialog::refreshList);
 	connect(cm, &ConfigManager::multiviewRenamed, this, &ManageMultiviewsDialog::refreshList);
+	connect(cm, &ConfigManager::multiviewsReloaded, this, &ManageMultiviewsDialog::refreshList);
 
 	refreshList();
 }
 
 void ManageMultiviewsDialog::refreshList()
 {
-	QString current;
-	if (listWidget_->currentItem())
-		current = listWidget_->currentItem()->text();
+	QString currentId = selectedId();
 
 	listWidget_->clear();
-	QStringList names = GetConfigManager()->multiviewNames();
-	names.sort(Qt::CaseInsensitive);
-	listWidget_->addItems(names);
-
-	if (!current.isEmpty()) {
-		auto items = listWidget_->findItems(current, Qt::MatchExactly);
-		if (!items.isEmpty())
-			listWidget_->setCurrentItem(items.first());
+	for (const MultiviewConfig &mv : GetConfigManager()->multiviews()) {
+		auto *item = new QListWidgetItem(mv.name, listWidget_);
+		item->setData(Qt::UserRole, mv.id);
+		if (mv.id == currentId)
+			listWidget_->setCurrentItem(item);
 	}
 	onSelectionChanged();
+}
+
+QString ManageMultiviewsDialog::selectedId() const
+{
+	QListWidgetItem *item = listWidget_->currentItem();
+	return item ? item->data(Qt::UserRole).toString() : QString();
 }
 
 void ManageMultiviewsDialog::onSelectionChanged()
@@ -111,98 +113,100 @@ void ManageMultiviewsDialog::onSelectionChanged()
 
 void ManageMultiviewsDialog::onShow()
 {
-	if (!listWidget_->currentItem())
-		return;
-	MultiviewWindow::openOrFocus(listWidget_->currentItem()->text());
+	QString id = selectedId();
+	if (!id.isEmpty())
+		MultiviewWindow::openOrFocus(id);
 }
 
 void ManageMultiviewsDialog::onEdit()
 {
-	if (!listWidget_->currentItem())
+	QString id = selectedId();
+	if (id.isEmpty())
 		return;
 
-	QString name = listWidget_->currentItem()->text();
-	MultiviewConfig config = GetConfigManager()->getMultiview(name);
-	MultiviewEditDialog dlg(config, false, this);
-	if (dlg.exec() == QDialog::Accepted) {
-		// Reload any open window for this multiview
-		MultiviewWindow *win = MultiviewWindow::findByName(name);
-		if (win)
-			win->reloadConfig();
-	}
+	// An open window reloads through ConfigManager::multiviewUpdated
+	MultiviewEditDialog dlg(GetConfigManager()->getMultiview(id), false, this);
+	dlg.exec();
 }
 
 void ManageMultiviewsDialog::onRename()
 {
-	if (!listWidget_->currentItem())
+	QString id = selectedId();
+	if (id.isEmpty())
 		return;
 
-	QString oldName = listWidget_->currentItem()->text();
+	ConfigManager *cm = GetConfigManager();
+	QString oldName = cm->getMultiview(id).name;
 	bool ok;
 	QString newName = QInputDialog::getText(this, LG_TEXT("ManageDialog.RenameMultiview"),
 						LG_TEXT("ManageDialog.RenamePrompt"), QLineEdit::Normal, oldName, &ok);
-	if (!ok || newName.trimmed().isEmpty() || newName.trimmed() == oldName)
+	newName = newName.trimmed();
+	if (!ok || newName.isEmpty() || newName == oldName)
 		return;
 
-	newName = newName.trimmed();
-	if (GetConfigManager()->hasMultiview(newName)) {
+	if (cm->isNameTaken(newName, id)) {
 		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("ManageDialog.MultiviewExists"));
 		return;
 	}
 
-	GetConfigManager()->renameMultiview(oldName, newName);
+	// Open windows retitle themselves from the rename signal
+	cm->renameMultiview(id, newName);
 }
 
 void ManageMultiviewsDialog::onDelete()
 {
-	if (!listWidget_->currentItem())
+	QString id = selectedId();
+	if (id.isEmpty())
 		return;
 
-	QString name = listWidget_->currentItem()->text();
+	QString name = GetConfigManager()->getMultiview(id).name;
 	auto reply = QMessageBox::question(this, LG_TEXT("ManageDialog.DeleteMultiview"),
 					   QString(LG_TEXT("ManageDialog.DeleteConfirm")).arg(name),
 					   QMessageBox::Yes | QMessageBox::No);
 	if (reply == QMessageBox::Yes) {
-		MultiviewWindow::closeByName(name);
-		GetConfigManager()->removeMultiview(name);
+		// An open window closes itself from the removal signal
+		GetConfigManager()->removeMultiview(id);
 	}
 }
 
 void ManageMultiviewsDialog::onDuplicate()
 {
-	if (!listWidget_->currentItem())
+	QString id = selectedId();
+	if (id.isEmpty())
 		return;
 
-	QString srcName = listWidget_->currentItem()->text();
+	ConfigManager *cm = GetConfigManager();
 	bool ok;
 	QString newName = QInputDialog::getText(this, LG_TEXT("ManageDialog.DuplicateMultiview"),
 						LG_TEXT("ManageDialog.DuplicatePrompt"), QLineEdit::Normal,
-						srcName + LG_TEXT("ManageDialog.DuplicateSuffix"), &ok);
-	if (!ok || newName.trimmed().isEmpty())
+						cm->getMultiview(id).name + LG_TEXT("ManageDialog.DuplicateSuffix"),
+						&ok);
+	newName = newName.trimmed();
+	if (!ok || newName.isEmpty())
 		return;
 
-	newName = newName.trimmed();
-	if (GetConfigManager()->hasMultiview(newName)) {
+	if (cm->isNameTaken(newName)) {
 		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("ManageDialog.MultiviewExists"));
 		return;
 	}
 
-	GetConfigManager()->duplicateMultiview(srcName, newName);
+	cm->duplicateMultiview(id, newName);
 }
 
 void ManageMultiviewsDialog::onCreateTemplate()
 {
-	if (!listWidget_->currentItem())
+	QString id = selectedId();
+	if (id.isEmpty())
 		return;
 
-	QString mvName = listWidget_->currentItem()->text();
+	MultiviewConfig mv = GetConfigManager()->getMultiview(id);
 
 	// Build a custom dialog with name field and preserve-sources checkbox
 	QDialog dlg(this);
 	dlg.setWindowTitle(LG_TEXT("ManageDialog.CreateTemplate"));
 	auto *layout = new QFormLayout(&dlg);
 
-	auto *nameEdit = new QLineEdit(mvName + LG_TEXT("ManageDialog.TemplateSuffix"));
+	auto *nameEdit = new QLineEdit(mv.name + LG_TEXT("ManageDialog.TemplateSuffix"));
 	layout->addRow(LG_TEXT("ManageDialog.TemplateNamePrompt"), nameEdit);
 
 	auto *preserveCheck = new QCheckBox(LG_TEXT("ManageDialog.PreserveSources"));
@@ -228,7 +232,6 @@ void ManageMultiviewsDialog::onCreateTemplate()
 
 	bool preserveSources = preserveCheck->isChecked();
 
-	MultiviewConfig mv = GetConfigManager()->getMultiview(mvName);
 	TemplateConfig tmpl;
 	tmpl.name = templateName;
 	tmpl.gridRows = mv.gridRows;
@@ -242,13 +245,13 @@ void ManageMultiviewsDialog::onCreateTemplate()
 			QString origLabel;
 			switch (tc.widget.type) {
 			case WidgetType::Preview:
-				origLabel = "Preview";
+				origLabel = LG_TEXT("GridEditor.Preview");
 				break;
 			case WidgetType::Program:
-				origLabel = "Program";
+				origLabel = LG_TEXT("GridEditor.Program");
 				break;
 			case WidgetType::Canvas:
-				origLabel = "Canvas";
+				origLabel = LG_TEXT("GridEditor.Canvas");
 				break;
 			case WidgetType::Scene:
 				origLabel = tc.widget.sceneName;
@@ -262,6 +265,7 @@ void ManageMultiviewsDialog::onCreateTemplate()
 			tc.widget.type = WidgetType::Placeholder;
 			tc.widget.sceneName.clear();
 			tc.widget.sourceName.clear();
+			tc.widget.sourceUuid.clear();
 			if (!origLabel.isEmpty() && tc.widget.labelText.isEmpty())
 				tc.widget.labelText = origLabel;
 		}

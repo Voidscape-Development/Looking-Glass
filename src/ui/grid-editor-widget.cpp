@@ -18,11 +18,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "grid-editor-widget.hpp"
 #include "../plugin.hpp"
+#include "../core/grid-model.hpp"
 
 #include <QPainter>
 #include <QMouseEvent>
 #include <QToolTip>
-#include <algorithm>
 
 GridEditorWidget::GridEditorWidget(QWidget *parent) : QWidget(parent)
 {
@@ -46,22 +46,13 @@ void GridEditorWidget::setGrid(int rows, int cols, const QVector<CellConfig> &ce
 
 int GridEditorWidget::selectedCellIndex() const
 {
-	if (selectedPositions_.isEmpty())
-		return -1;
-	QPoint first = *selectedPositions_.begin();
-	int idx = ownerAt(first.y(), first.x());
-	// Check all selected are same cell
-	for (const QPoint &p : selectedPositions_) {
-		if (ownerAt(p.y(), p.x()) != idx)
-			return -1;
-	}
-	return idx;
+	return GridModel::SingleCellAt(rows_, cols_, cells_, selectedPositions_);
 }
 
 void GridEditorWidget::setWidgetForSelected(const WidgetConfig &widget)
 {
 	int idx = selectedCellIndex();
-	if (idx >= 0 && idx < cells_.size()) {
+	if (idx >= 0 && idx < (int)cells_.size()) {
 		cells_[idx].widget = widget;
 		update();
 		emit cellsChanged();
@@ -70,141 +61,19 @@ void GridEditorWidget::setWidgetForSelected(const WidgetConfig &widget)
 
 bool GridEditorWidget::canMergeSelected() const
 {
-	if (selectedPositions_.size() < 2)
-		return false;
-
-	// Compute bounding rect
-	int minR = INT_MAX, maxR = 0, minC = INT_MAX, maxC = 0;
-	for (const QPoint &p : selectedPositions_) {
-		minR = qMin(minR, p.y());
-		maxR = qMax(maxR, p.y());
-		minC = qMin(minC, p.x());
-		maxC = qMax(maxC, p.x());
-	}
-
-	// All positions in bounding rect must be selected
-	int expected = (maxR - minR + 1) * (maxC - minC + 1);
-	if ((int)selectedPositions_.size() != expected)
-		return false;
-
-	for (int r = minR; r <= maxR; r++) {
-		for (int c = minC; c <= maxC; c++) {
-			if (!selectedPositions_.contains(QPoint(c, r)))
-				return false;
-		}
-	}
-
-	// Check no partial merges: any existing merged cell must be fully inside selection
-	QSet<int> touchedCells;
-	for (const QPoint &p : selectedPositions_) {
-		int idx = ownerAt(p.y(), p.x());
-		if (idx >= 0)
-			touchedCells.insert(idx);
-	}
-
-	for (int idx : touchedCells) {
-		const CellConfig &cell = cells_[idx];
-		for (int r = cell.row; r < cell.row + cell.rowSpan; r++) {
-			for (int c = cell.col; c < cell.col + cell.colSpan; c++) {
-				if (!selectedPositions_.contains(QPoint(c, r)))
-					return false;
-			}
-		}
-	}
-
-	return true;
+	return GridModel::CanMerge(rows_, cols_, cells_, selectedPositions_);
 }
 
 void GridEditorWidget::mergeSelected()
 {
 	if (!canMergeSelected())
 		return;
-
-	int minR = INT_MAX, maxR = 0, minC = INT_MAX, maxC = 0;
-	for (const QPoint &p : selectedPositions_) {
-		minR = qMin(minR, p.y());
-		maxR = qMax(maxR, p.y());
-		minC = qMin(minC, p.x());
-		maxC = qMax(maxC, p.x());
-	}
-
-	// Remove all cells that are fully inside the selection
-	QSet<int> toRemove;
-	for (const QPoint &p : selectedPositions_) {
-		int idx = ownerAt(p.y(), p.x());
-		if (idx >= 0)
-			toRemove.insert(idx);
-	}
-
-	// Sort descending so removal doesn't shift indices
-	QList<int> sorted = toRemove.values();
-	std::sort(sorted.begin(), sorted.end(), std::greater<int>());
-	for (int idx : sorted)
-		cells_.removeAt(idx);
-
-	// Create merged cell
-	CellConfig merged;
-	merged.row = minR;
-	merged.col = minC;
-	merged.rowSpan = maxR - minR + 1;
-	merged.colSpan = maxC - minC + 1;
-	cells_.append(merged);
-
-	selectedPositions_.clear();
-	rebuildOwnership();
-	update();
-	emit selectionChanged();
-	emit cellsChanged();
+	applyCells(GridModel::Merge(rows_, cols_, cells_, selectedPositions_));
 }
 
 bool GridEditorWidget::canResetSelected() const
 {
-	if (selectedPositions_.isEmpty())
-		return false;
-
-	// Single cell selection is always valid for reset
-	if (selectedCellIndex() >= 0)
-		return true;
-
-	// Multi-cell: must form a complete rectangle with no partial overlaps
-	int minR = INT_MAX, maxR = 0, minC = INT_MAX, maxC = 0;
-	for (const QPoint &p : selectedPositions_) {
-		minR = qMin(minR, p.y());
-		maxR = qMax(maxR, p.y());
-		minC = qMin(minC, p.x());
-		maxC = qMax(maxC, p.x());
-	}
-
-	int expected = (maxR - minR + 1) * (maxC - minC + 1);
-	if ((int)selectedPositions_.size() != expected)
-		return false;
-
-	for (int r = minR; r <= maxR; r++) {
-		for (int c = minC; c <= maxC; c++) {
-			if (!selectedPositions_.contains(QPoint(c, r)))
-				return false;
-		}
-	}
-
-	// Any existing merged cell must be fully inside the selection
-	QSet<int> touchedCells;
-	for (const QPoint &p : selectedPositions_) {
-		int idx = ownerAt(p.y(), p.x());
-		if (idx >= 0)
-			touchedCells.insert(idx);
-	}
-
-	for (int idx : touchedCells) {
-		const CellConfig &cell = cells_[idx];
-		for (int r = cell.row; r < cell.row + cell.rowSpan; r++) {
-			for (int c = cell.col; c < cell.col + cell.colSpan; c++) {
-				if (!selectedPositions_.contains(QPoint(c, r)))
-					return false;
-			}
-		}
-	}
-
-	return true;
+	return GridModel::CanReset(rows_, cols_, cells_, selectedPositions_);
 }
 
 void GridEditorWidget::resetSelected()
@@ -212,50 +81,22 @@ void GridEditorWidget::resetSelected()
 	if (!canResetSelected())
 		return;
 
-	// Fast path: single 1x1 cell, just clear its widget
-	int singleIdx = selectedCellIndex();
-	if (singleIdx >= 0 && singleIdx < cells_.size()) {
-		const CellConfig &cell = cells_[singleIdx];
-		if (cell.rowSpan == 1 && cell.colSpan == 1) {
-			cells_[singleIdx].widget = WidgetConfig();
-			rebuildOwnership();
-			update();
-			emit cellsChanged();
-			return;
-		}
+	// Clearing a single 1x1 cell keeps it selected for further edits
+	int single = selectedCellIndex();
+	bool keepSelection = single >= 0 && cells_[single].rowSpan == 1 && cells_[single].colSpan == 1;
+
+	QSet<QPoint> selection = selectedPositions_;
+	applyCells(GridModel::Reset(rows_, cols_, cells_, selectedPositions_));
+	if (keepSelection) {
+		selectedPositions_ = selection;
+		update();
+		emit selectionChanged();
 	}
+}
 
-	// Mass reset: remove all touched cells, replace with empty 1x1 cells
-	QSet<int> toRemove;
-	for (const QPoint &p : selectedPositions_) {
-		int idx = ownerAt(p.y(), p.x());
-		if (idx >= 0)
-			toRemove.insert(idx);
-	}
-
-	// Collect ALL grid positions covered by the cells being removed,
-	// so we can create 1x1 replacements for every position (not just selected ones)
-	QSet<QPoint> positionsToFill;
-	for (int idx : toRemove) {
-		const CellConfig &cell = cells_[idx];
-		for (int r = cell.row; r < cell.row + cell.rowSpan; r++)
-			for (int c = cell.col; c < cell.col + cell.colSpan; c++)
-				positionsToFill.insert(QPoint(c, r));
-	}
-
-	QList<int> sorted = toRemove.values();
-	std::sort(sorted.begin(), sorted.end(), std::greater<int>());
-	for (int idx : sorted)
-		cells_.removeAt(idx);
-
-	// Create individual empty 1x1 cells for every position the removed cells occupied
-	for (const QPoint &p : positionsToFill) {
-		CellConfig newCell;
-		newCell.row = p.y();
-		newCell.col = p.x();
-		cells_.append(newCell);
-	}
-
+void GridEditorWidget::applyCells(const QVector<CellConfig> &cells)
+{
+	cells_ = cells;
 	selectedPositions_.clear();
 	rebuildOwnership();
 	update();
@@ -272,33 +113,14 @@ void GridEditorWidget::clearSelection()
 
 void GridEditorWidget::rebuildOwnership()
 {
-	ownership_.clear();
-	ownership_.resize(rows_);
-	for (int r = 0; r < rows_; r++) {
-		ownership_[r].resize(cols_);
-		ownership_[r].fill(-1);
-	}
-
-	for (int i = 0; i < cells_.size(); i++) {
-		const CellConfig &cell = cells_[i];
-		for (int r = cell.row; r < cell.row + cell.rowSpan && r < rows_; r++) {
-			for (int c = cell.col; c < cell.col + cell.colSpan && c < cols_; c++) {
-				ownership_[r][c] = i;
-			}
-		}
-	}
+	ownership_ = GridModel::Ownership(rows_, cols_, cells_);
 }
 
 int GridEditorWidget::ownerAt(int row, int col) const
 {
 	if (row < 0 || row >= rows_ || col < 0 || col >= cols_)
 		return -1;
-	return ownership_[row][col];
-}
-
-int GridEditorWidget::cellIndexAt(int row, int col) const
-{
-	return ownerAt(row, col);
+	return ownership_[row * cols_ + col];
 }
 
 QPoint GridEditorWidget::gridPosFromPixel(const QPoint &pixel) const
@@ -434,7 +256,7 @@ void GridEditorWidget::paintEvent(QPaintEvent *)
 	// Draw empty cells (not owned by any CellConfig)
 	for (int r = 0; r < rows_; r++) {
 		for (int c = 0; c < cols_; c++) {
-			if (ownership_[r][c] >= 0)
+			if (ownerAt(r, c) >= 0)
 				continue;
 			QRect cr = cellRect(r, c, 1, 1);
 			bool selected = selectedPositions_.contains(QPoint(c, r));

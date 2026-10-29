@@ -1,0 +1,31 @@
+name: Unit Tests
+on:
+  workflow_call:
+jobs:
+  unit-tests:
+    name: Run Unit Tests 🧪
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies 🛍️
+        run: |
+          : Install Dependencies 🛍️
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake ninja-build qt6-base-dev
+
+      - name: Build Tests 🧱
+        run: |
+          : Build Tests 🧱
+          cmake -S tests -B build_tests -G Ninja
+          cmake --build build_tests
+
+      - name: Run Tests 🧪
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          : Run Tests 🧪
+          ctest --test-dir build_tests --output-on-failure

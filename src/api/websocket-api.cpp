@@ -77,9 +77,10 @@ bool RunOnUiThread(const std::function<void()> &fn)
 }
 
 // Shared body for every request: pull the multiview name out of the payload,
-// then run `action` against it on the UI thread and report the outcome.
+// resolve it to the multiview's id on the UI thread, run `action` with that id,
+// and report the outcome.
 void HandleMultiviewRequest(obs_data_t *request_data, obs_data_t *response_data,
-			    const std::function<void(const QString &)> &action)
+			    const std::function<void(const QString &id)> &action)
 {
 	const QString name = QString::fromUtf8(obs_data_get_string(request_data, FIELD_MULTIVIEW_NAME));
 	if (name.isEmpty()) {
@@ -91,11 +92,12 @@ void HandleMultiviewRequest(obs_data_t *request_data, obs_data_t *response_data,
 	bool exists = false;
 	const bool ran = RunOnUiThread([&]() {
 		ConfigManager *cm = GetConfigManager();
-		if (!cm || !cm->hasMultiview(name))
+		QString id = cm ? cm->findIdByName(name) : QString();
+		if (id.isEmpty())
 			return;
 
 		exists = true;
-		action(name);
+		action(id);
 	});
 
 	if (!ran) {
@@ -116,23 +118,21 @@ void HandleMultiviewRequest(obs_data_t *request_data, obs_data_t *response_data,
 void OnOpenMultiview(obs_data_t *request_data, obs_data_t *response_data, void *)
 {
 	HandleMultiviewRequest(request_data, response_data,
-			       [](const QString &name) { MultiviewWindow::openOrFocus(name); });
+			       [](const QString &id) { MultiviewWindow::openOrFocus(id); });
 }
 
 // Closes the multiview window. Succeeds as a no-op when it is not open.
 void OnCloseMultiview(obs_data_t *request_data, obs_data_t *response_data, void *)
 {
-	HandleMultiviewRequest(request_data, response_data,
-			       [](const QString &name) { MultiviewWindow::closeByName(name); });
+	HandleMultiviewRequest(request_data, response_data, [](const QString &id) { MultiviewWindow::closeById(id); });
 }
 
 // Opens the multiview if needed, then moves it to the main display.
 void OnSendMultiviewToMainDisplay(obs_data_t *request_data, obs_data_t *response_data, void *)
 {
-	HandleMultiviewRequest(request_data, response_data, [](const QString &name) {
-		MultiviewWindow::openOrFocus(name);
-		MultiviewWindow *win = MultiviewWindow::findByName(name);
-		if (win)
+	HandleMultiviewRequest(request_data, response_data, [](const QString &id) {
+		MultiviewWindow::openOrFocus(id);
+		if (MultiviewWindow *win = MultiviewWindow::findById(id))
 			win->sendToMainDisplay();
 	});
 }

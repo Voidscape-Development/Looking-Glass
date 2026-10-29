@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "cell-config-dialog.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
+#include "../core/grid-model.hpp"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -69,7 +70,7 @@ ManageTemplatesDialog::ManageTemplatesDialog(QWidget *parent) : QDialog(parent)
 
 bool ManageTemplatesDialog::isDefaultTemplate(const QString &name) const
 {
-	return name == GetConfigManager()->defaultTemplate().name;
+	return GetConfigManager()->isBuiltInTemplate(name);
 }
 
 void ManageTemplatesDialog::refreshList()
@@ -96,8 +97,10 @@ void ManageTemplatesDialog::onSelectionChanged()
 	bool hasSelection = listWidget_->currentItem() != nullptr;
 	bool isDefault = hasSelection && isDefaultTemplate(listWidget_->currentItem()->text());
 
+	// The built-in default is generated from the current scenes and is
+	// read-only
 	renameBtn_->setEnabled(hasSelection && !isDefault);
-	editBtn_->setEnabled(hasSelection);
+	editBtn_->setEnabled(hasSelection && !isDefault);
 	deleteBtn_->setEnabled(hasSelection && !isDefault);
 }
 
@@ -135,8 +138,12 @@ void ManageTemplatesDialog::onEdit()
 		return;
 
 	QString templateName = listWidget_->currentItem()->text();
+	if (isDefaultTemplate(templateName)) {
+		QMessageBox::warning(this, LG_TEXT("Common.Error"),
+				     LG_TEXT("ManageTemplatesDialog.CannotModifyDefault"));
+		return;
+	}
 	TemplateConfig tmpl = GetConfigManager()->getTemplate(templateName);
-	bool isDefault = isDefaultTemplate(templateName);
 
 	// Build an edit dialog with grid editor, size controls, and template properties
 	QDialog dlg(this);
@@ -149,8 +156,6 @@ void ManageTemplatesDialog::onEdit()
 	auto *nameLayout = new QHBoxLayout();
 	nameLayout->addWidget(new QLabel(LG_TEXT("ManageTemplatesDialog.NameLabel")));
 	auto *nameEdit = new QLineEdit(templateName);
-	if (isDefault)
-		nameEdit->setReadOnly(true);
 	nameLayout->addWidget(nameEdit);
 	mainLayout->addLayout(nameLayout);
 
@@ -166,12 +171,12 @@ void ManageTemplatesDialog::onEdit()
 
 	auto *gridSettingsForm = new QFormLayout();
 	auto *rowsSpin = new QSpinBox();
-	rowsSpin->setRange(1, 16);
+	rowsSpin->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
 	rowsSpin->setValue(tmpl.gridRows);
 	gridSettingsForm->addRow(LG_TEXT("EditDialog.Rows"), rowsSpin);
 
 	auto *colsSpin = new QSpinBox();
-	colsSpin->setRange(1, 16);
+	colsSpin->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
 	colsSpin->setValue(tmpl.gridCols);
 	gridSettingsForm->addRow(LG_TEXT("EditDialog.Columns"), colsSpin);
 
@@ -255,33 +260,7 @@ void ManageTemplatesDialog::onEdit()
 		if (newRows == oldRows && newCols == oldCols)
 			return;
 
-		QVector<CellConfig> oldCells = gridEditor->cells();
-		QVector<CellConfig> newCells;
-		QVector<QVector<bool>> occupied(newRows);
-		for (int r = 0; r < newRows; r++)
-			occupied[r].resize(newCols, false);
-
-		for (const CellConfig &cell : oldCells) {
-			if (cell.row < newRows && cell.col < newCols) {
-				CellConfig c = cell;
-				if (c.row + c.rowSpan > newRows)
-					c.rowSpan = newRows - c.row;
-				if (c.col + c.colSpan > newCols)
-					c.colSpan = newCols - c.col;
-				newCells.append(c);
-				for (int r = c.row; r < c.row + c.rowSpan; r++)
-					for (int col = c.col; col < c.col + c.colSpan; col++)
-						occupied[r][col] = true;
-			}
-		}
-		for (int r = 0; r < newRows; r++)
-			for (int c = 0; c < newCols; c++)
-				if (!occupied[r][c]) {
-					CellConfig newCell;
-					newCell.row = r;
-					newCell.col = c;
-					newCells.append(newCell);
-				}
+		QVector<CellConfig> newCells = GridModel::Resize(gridEditor->cells(), newRows, newCols);
 		gridEditor->setGrid(newRows, newCols, newCells);
 	};
 
@@ -316,10 +295,7 @@ void ManageTemplatesDialog::onEdit()
 		return;
 	}
 
-	// Remove old template and add updated one
-	if (!isDefault)
-		cm->removeTemplate(templateName);
-	cm->addTemplate(updated);
+	cm->replaceTemplate(templateName, updated);
 }
 
 void ManageTemplatesDialog::onDelete()

@@ -17,10 +17,34 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "multiview-config.hpp"
+#include "grid-model.hpp"
+
+#include <QJsonArray>
+#include <QSet>
+#include <QUuid>
+
+#include <algorithm>
+
+QString WidgetConfig::targetName() const
+{
+	switch (type) {
+	case WidgetType::Scene:
+		return sceneName;
+	case WidgetType::Source:
+		return sourceName;
+	default:
+		return QString();
+	}
+}
+
+namespace {
+
+constexpr int kMinBorderWidth = 1;
+constexpr int kMaxBorderWidth = 10;
 
 // --- String conversion helpers for enum serialization ---
 
-static const char *WidgetTypeToString(WidgetType t)
+const char *WidgetTypeToString(WidgetType t)
 {
 	switch (t) {
 	case WidgetType::Preview:
@@ -40,26 +64,24 @@ static const char *WidgetTypeToString(WidgetType t)
 	}
 }
 
-static WidgetType StringToWidgetType(const char *s)
+WidgetType StringToWidgetType(const QString &s)
 {
-	if (!s)
-		return WidgetType::None;
-	if (strcmp(s, "preview") == 0)
+	if (s == QLatin1String("preview"))
 		return WidgetType::Preview;
-	if (strcmp(s, "program") == 0)
+	if (s == QLatin1String("program"))
 		return WidgetType::Program;
-	if (strcmp(s, "canvas") == 0)
+	if (s == QLatin1String("canvas"))
 		return WidgetType::Canvas;
-	if (strcmp(s, "scene") == 0)
+	if (s == QLatin1String("scene"))
 		return WidgetType::Scene;
-	if (strcmp(s, "source") == 0)
+	if (s == QLatin1String("source"))
 		return WidgetType::Source;
-	if (strcmp(s, "placeholder") == 0)
+	if (s == QLatin1String("placeholder"))
 		return WidgetType::Placeholder;
 	return WidgetType::None;
 }
 
-static const char *AlignHToString(Qt::Alignment a)
+const char *AlignHToString(Qt::Alignment a)
 {
 	if (a & Qt::AlignLeft)
 		return "left";
@@ -68,240 +90,302 @@ static const char *AlignHToString(Qt::Alignment a)
 	return "center";
 }
 
-static Qt::Alignment StringToAlignH(const char *s)
+Qt::Alignment StringToAlignH(const QString &s)
 {
-	if (!s)
-		return Qt::AlignHCenter;
-	if (strcmp(s, "left") == 0)
+	if (s == QLatin1String("left"))
 		return Qt::AlignLeft;
-	if (strcmp(s, "right") == 0)
+	if (s == QLatin1String("right"))
 		return Qt::AlignRight;
 	return Qt::AlignHCenter;
 }
 
-static const char *AlignVToString(Qt::Alignment a)
+const char *AlignVToString(Qt::Alignment a)
 {
 	if (a & Qt::AlignTop)
 		return "top";
-	if (a & Qt::AlignBottom)
-		return "bottom";
-	return "middle";
+	if (a & Qt::AlignVCenter)
+		return "middle";
+	return "bottom";
 }
 
-static Qt::Alignment StringToAlignV(const char *s)
+Qt::Alignment StringToAlignV(const QString &s)
 {
-	if (!s)
+	if (s == QLatin1String("top"))
 		return Qt::AlignTop;
-	if (strcmp(s, "top") == 0)
-		return Qt::AlignTop;
-	if (strcmp(s, "bottom") == 0)
-		return Qt::AlignBottom;
-	return Qt::AlignVCenter;
+	if (s == QLatin1String("middle"))
+		return Qt::AlignVCenter;
+	return Qt::AlignBottom;
 }
 
-namespace MultiviewSerializer {
-
-obs_data_t *WidgetToData(const WidgetConfig &w)
+QColor ColorFromJson(const QJsonValue &value, const QColor &fallback)
 {
-	obs_data_t *data = obs_data_create();
-	obs_data_set_string(data, "type", WidgetTypeToString(w.type));
-	obs_data_set_string(data, "scene_name", w.sceneName.toUtf8().constData());
-	obs_data_set_string(data, "source_name", w.sourceName.toUtf8().constData());
-	obs_data_set_string(data, "placeholder_path", w.placeholderPath.toUtf8().constData());
-	obs_data_set_string(data, "canvas_name", w.canvasName.toUtf8().constData());
-	obs_data_set_bool(data, "label_visible", w.labelVisible);
-	obs_data_set_string(data, "label_h_align", AlignHToString(w.labelHAlign));
-	obs_data_set_string(data, "label_v_align", AlignVToString(w.labelVAlign));
-	obs_data_set_string(data, "label_text", w.labelText.toUtf8().constData());
-	obs_data_set_string(data, "label_font", w.labelFont.toUtf8().constData());
-	obs_data_set_string(data, "label_bg_color", w.labelBgColor.name(QColor::HexArgb).toUtf8().constData());
-	obs_data_set_bool(data, "safe_region", w.safeRegion);
-	obs_data_set_bool(data, "show_status", w.showStatus);
-	return data;
+	QColor color(value.toString());
+	return color.isValid() ? color : fallback;
 }
 
-WidgetConfig WidgetFromData(obs_data_t *data)
+int IntFromJson(const QJsonObject &obj, const char *key, int fallback)
 {
-	WidgetConfig w;
-	w.type = StringToWidgetType(obs_data_get_string(data, "type"));
-	w.sceneName = QString::fromUtf8(obs_data_get_string(data, "scene_name"));
-	w.sourceName = QString::fromUtf8(obs_data_get_string(data, "source_name"));
-	w.placeholderPath = QString::fromUtf8(obs_data_get_string(data, "placeholder_path"));
-	w.canvasName = QString::fromUtf8(obs_data_get_string(data, "canvas_name"));
-	w.labelVisible = obs_data_get_bool(data, "label_visible");
-	w.labelHAlign = StringToAlignH(obs_data_get_string(data, "label_h_align"));
-	w.labelVAlign = StringToAlignV(obs_data_get_string(data, "label_v_align"));
-	w.labelText = QString::fromUtf8(obs_data_get_string(data, "label_text"));
-	w.labelFont = QString::fromUtf8(obs_data_get_string(data, "label_font"));
+	QJsonValue value = obj.value(QLatin1String(key));
+	return value.isDouble() ? value.toInt(fallback) : fallback;
+}
 
-	QString bgColorStr = QString::fromUtf8(obs_data_get_string(data, "label_bg_color"));
-	if (!bgColorStr.isEmpty())
-		w.labelBgColor = QColor(bgColorStr);
-	else
-		w.labelBgColor = QColor(0, 0, 0, 128);
+QString NewId()
+{
+	return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
 
-	w.safeRegion = obs_data_get_bool(data, "safe_region");
-	w.showStatus = obs_data_get_bool(data, "show_status");
+// Clamps grid dimensions and repairs the cell list so the rest of the plugin
+// can assume a well-formed layout
+void SanitizeGrid(int &rows, int &cols, QVector<CellConfig> &cells)
+{
+	rows = std::clamp(rows, GridModel::kMinGridSize, GridModel::kMaxGridSize);
+	cols = std::clamp(cols, GridModel::kMinGridSize, GridModel::kMaxGridSize);
+	cells = GridModel::Normalize(rows, cols, cells);
+}
 
+QJsonArray CellsToJson(const QVector<CellConfig> &cells)
+{
+	QJsonArray array;
+	for (const CellConfig &cell : cells)
+		array.append(MultiviewSerializer::CellToJson(cell));
+	return array;
+}
+
+QVector<CellConfig> CellsFromJson(const QJsonValue &value)
+{
+	QVector<CellConfig> cells;
+	const QJsonArray array = value.toArray();
+	for (const QJsonValue &item : array)
+		cells.append(MultiviewSerializer::CellFromJson(item.toObject()));
+	return cells;
+}
+
+QJsonObject WindowToJson(const WindowState &w)
+{
+	QJsonObject obj;
+	obj["x"] = w.geometry.x();
+	obj["y"] = w.geometry.y();
+	obj["width"] = w.geometry.width();
+	obj["height"] = w.geometry.height();
+	obj["screen_name"] = w.screenName;
+	obj["screen_index"] = w.screenIndex;
+	obj["fullscreen"] = w.fullscreen;
+	obj["open"] = w.open;
+	return obj;
+}
+
+WindowState WindowFromJson(const QJsonObject &obj)
+{
+	WindowState w;
+	int width = IntFromJson(obj, "width", 0);
+	int height = IntFromJson(obj, "height", 0);
+	if (width > 0 && height > 0)
+		w.geometry = QRect(IntFromJson(obj, "x", 0), IntFromJson(obj, "y", 0), width, height);
+	w.screenName = obj.value("screen_name").toString();
+	w.screenIndex = IntFromJson(obj, "screen_index", -1);
+	w.fullscreen = obj.value("fullscreen").toBool(false);
+	w.open = obj.value("open").toBool(false);
 	return w;
 }
 
-obs_data_t *CellToData(const CellConfig &c)
+// Version 1 stored the window state as flat keys on the multiview itself
+WindowState LegacyWindowFromJson(const QJsonObject &obj)
 {
-	obs_data_t *data = obs_data_create();
-	obs_data_set_int(data, "row", c.row);
-	obs_data_set_int(data, "col", c.col);
-	obs_data_set_int(data, "row_span", c.rowSpan);
-	obs_data_set_int(data, "col_span", c.colSpan);
-
-	obs_data_t *widgetData = WidgetToData(c.widget);
-	obs_data_set_obj(data, "widget", widgetData);
-	obs_data_release(widgetData);
-
-	return data;
+	WindowState w;
+	int width = IntFromJson(obj, "geometry_w", 0);
+	int height = IntFromJson(obj, "geometry_h", 0);
+	if (width > 0 && height > 0)
+		w.geometry = QRect(IntFromJson(obj, "geometry_x", 0), IntFromJson(obj, "geometry_y", 0), width, height);
+	w.screenIndex = IntFromJson(obj, "monitor_id", -1);
+	w.fullscreen = obj.value("fullscreen").toBool(false);
+	w.open = obj.value("was_open").toBool(false);
+	return w;
 }
 
-CellConfig CellFromData(obs_data_t *data)
+} // namespace
+
+namespace MultiviewSerializer {
+
+QJsonObject WidgetToJson(const WidgetConfig &w)
+{
+	QJsonObject obj;
+	obj["type"] = WidgetTypeToString(w.type);
+	obj["scene_name"] = w.sceneName;
+	obj["source_name"] = w.sourceName;
+	obj["source_uuid"] = w.sourceUuid;
+	obj["placeholder_path"] = w.placeholderPath;
+	obj["canvas_name"] = w.canvasName;
+	obj["label_visible"] = w.labelVisible;
+	obj["label_h_align"] = AlignHToString(w.labelHAlign);
+	obj["label_v_align"] = AlignVToString(w.labelVAlign);
+	obj["label_text"] = w.labelText;
+	obj["label_font"] = w.labelFont;
+	obj["label_bg_color"] = w.labelBgColor.name(QColor::HexArgb);
+	obj["safe_region"] = w.safeRegion;
+	obj["show_status"] = w.showStatus;
+	return obj;
+}
+
+WidgetConfig WidgetFromJson(const QJsonObject &obj)
+{
+	// Every key falls back to the WidgetConfig default, so files written by
+	// older versions (or edited by hand) load the way they were meant to
+	const WidgetConfig defaults;
+	WidgetConfig w;
+	w.type = StringToWidgetType(obj.value("type").toString());
+	w.sceneName = obj.value("scene_name").toString();
+	w.sourceName = obj.value("source_name").toString();
+	w.sourceUuid = obj.value("source_uuid").toString();
+	w.placeholderPath = obj.value("placeholder_path").toString();
+	w.canvasName = obj.value("canvas_name").toString();
+	w.labelVisible = obj.value("label_visible").toBool(defaults.labelVisible);
+	w.labelHAlign = StringToAlignH(obj.value("label_h_align").toString());
+	w.labelVAlign = StringToAlignV(obj.value("label_v_align").toString());
+	w.labelText = obj.value("label_text").toString();
+	w.labelFont = obj.value("label_font").toString();
+	w.labelBgColor = ColorFromJson(obj.value("label_bg_color"), defaults.labelBgColor);
+	w.safeRegion = obj.value("safe_region").toBool(defaults.safeRegion);
+	w.showStatus = obj.value("show_status").toBool(defaults.showStatus);
+	return w;
+}
+
+QJsonObject CellToJson(const CellConfig &c)
+{
+	QJsonObject obj;
+	obj["row"] = c.row;
+	obj["col"] = c.col;
+	obj["row_span"] = c.rowSpan;
+	obj["col_span"] = c.colSpan;
+	obj["widget"] = WidgetToJson(c.widget);
+	return obj;
+}
+
+CellConfig CellFromJson(const QJsonObject &obj)
 {
 	CellConfig c;
-	c.row = (int)obs_data_get_int(data, "row");
-	c.col = (int)obs_data_get_int(data, "col");
-	c.rowSpan = (int)obs_data_get_int(data, "row_span");
-	c.colSpan = (int)obs_data_get_int(data, "col_span");
-	if (c.rowSpan <= 0)
-		c.rowSpan = 1;
-	if (c.colSpan <= 0)
-		c.colSpan = 1;
-
-	obs_data_t *widgetData = obs_data_get_obj(data, "widget");
-	if (widgetData) {
-		c.widget = WidgetFromData(widgetData);
-		obs_data_release(widgetData);
-	}
+	c.row = IntFromJson(obj, "row", 0);
+	c.col = IntFromJson(obj, "col", 0);
+	c.rowSpan = std::max(1, IntFromJson(obj, "row_span", 1));
+	c.colSpan = std::max(1, IntFromJson(obj, "col_span", 1));
+	c.widget = WidgetFromJson(obj.value("widget").toObject());
 	return c;
 }
 
-obs_data_t *MultiviewToData(const MultiviewConfig &mv)
+QJsonObject MultiviewToJson(const MultiviewConfig &mv)
 {
-	obs_data_t *data = obs_data_create();
-	obs_data_set_string(data, "name", mv.name.toUtf8().constData());
-	obs_data_set_int(data, "grid_rows", mv.gridRows);
-	obs_data_set_int(data, "grid_cols", mv.gridCols);
-	obs_data_set_int(data, "grid_border_width", mv.gridBorderWidth);
-	obs_data_set_string(data, "grid_line_color", mv.gridLineColor.name(QColor::HexArgb).toUtf8().constData());
-	obs_data_set_int(data, "geometry_x", mv.geometry.x());
-	obs_data_set_int(data, "geometry_y", mv.geometry.y());
-	obs_data_set_int(data, "geometry_w", mv.geometry.width());
-	obs_data_set_int(data, "geometry_h", mv.geometry.height());
-	obs_data_set_int(data, "monitor_id", mv.monitorId);
-	obs_data_set_bool(data, "fullscreen", mv.fullscreen);
-	obs_data_set_bool(data, "was_open", mv.wasOpen);
-
-	obs_data_array_t *cellsArray = obs_data_array_create();
-	for (const auto &cell : mv.cells) {
-		obs_data_t *cellData = CellToData(cell);
-		obs_data_array_push_back(cellsArray, cellData);
-		obs_data_release(cellData);
-	}
-	obs_data_set_array(data, "cells", cellsArray);
-	obs_data_array_release(cellsArray);
-
-	return data;
+	QJsonObject obj;
+	obj["id"] = mv.id;
+	obj["name"] = mv.name;
+	obj["grid_rows"] = mv.gridRows;
+	obj["grid_cols"] = mv.gridCols;
+	obj["grid_border_width"] = mv.gridBorderWidth;
+	obj["grid_line_color"] = mv.gridLineColor.name(QColor::HexArgb);
+	obj["cells"] = CellsToJson(mv.cells);
+	obj["window"] = WindowToJson(mv.window);
+	return obj;
 }
 
-MultiviewConfig MultiviewFromData(obs_data_t *data)
+MultiviewConfig MultiviewFromJson(const QJsonObject &obj)
 {
+	const MultiviewConfig defaults;
 	MultiviewConfig mv;
-	mv.name = QString::fromUtf8(obs_data_get_string(data, "name"));
-	mv.gridRows = (int)obs_data_get_int(data, "grid_rows");
-	mv.gridCols = (int)obs_data_get_int(data, "grid_cols");
-	mv.gridBorderWidth = (int)obs_data_get_int(data, "grid_border_width");
-	if (mv.gridRows <= 0)
-		mv.gridRows = 4;
-	if (mv.gridCols <= 0)
-		mv.gridCols = 4;
-	if (mv.gridBorderWidth <= 0)
-		mv.gridBorderWidth = 1;
-	if (mv.gridBorderWidth > 10)
-		mv.gridBorderWidth = 10;
-
-	QString lineColorStr = QString::fromUtf8(obs_data_get_string(data, "grid_line_color"));
-	if (!lineColorStr.isEmpty())
-		mv.gridLineColor = QColor(lineColorStr);
-	else
-		mv.gridLineColor = QColor(255, 255, 255);
-
-	int gx = (int)obs_data_get_int(data, "geometry_x");
-	int gy = (int)obs_data_get_int(data, "geometry_y");
-	int gw = (int)obs_data_get_int(data, "geometry_w");
-	int gh = (int)obs_data_get_int(data, "geometry_h");
-	if (gw <= 0)
-		gw = 1280;
-	if (gh <= 0)
-		gh = 720;
-	mv.geometry = QRect(gx, gy, gw, gh);
-	mv.monitorId = (int)obs_data_get_int(data, "monitor_id");
-	mv.fullscreen = obs_data_get_bool(data, "fullscreen");
-	mv.wasOpen = obs_data_get_bool(data, "was_open");
-
-	obs_data_array_t *cellsArray = obs_data_get_array(data, "cells");
-	if (cellsArray) {
-		size_t count = obs_data_array_count(cellsArray);
-		for (size_t i = 0; i < count; i++) {
-			obs_data_t *cellData = obs_data_array_item(cellsArray, i);
-			mv.cells.append(CellFromData(cellData));
-			obs_data_release(cellData);
-		}
-		obs_data_array_release(cellsArray);
-	}
-
+	mv.id = obj.value("id").toString();
+	mv.name = obj.value("name").toString().trimmed();
+	mv.gridRows = IntFromJson(obj, "grid_rows", defaults.gridRows);
+	mv.gridCols = IntFromJson(obj, "grid_cols", defaults.gridCols);
+	mv.gridBorderWidth = std::clamp(IntFromJson(obj, "grid_border_width", defaults.gridBorderWidth),
+					kMinBorderWidth, kMaxBorderWidth);
+	mv.gridLineColor = ColorFromJson(obj.value("grid_line_color"), defaults.gridLineColor);
+	mv.cells = CellsFromJson(obj.value("cells"));
+	mv.window = obj.value("window").isObject() ? WindowFromJson(obj.value("window").toObject())
+						   : LegacyWindowFromJson(obj);
+	SanitizeGrid(mv.gridRows, mv.gridCols, mv.cells);
 	return mv;
 }
 
-obs_data_t *TemplateToData(const TemplateConfig &t)
+QJsonObject TemplateToJson(const TemplateConfig &t)
 {
-	obs_data_t *data = obs_data_create();
-	obs_data_set_string(data, "name", t.name.toUtf8().constData());
-	obs_data_set_int(data, "grid_rows", t.gridRows);
-	obs_data_set_int(data, "grid_cols", t.gridCols);
-	obs_data_set_bool(data, "preserve_sources", t.preserveSources);
-
-	obs_data_array_t *cellsArray = obs_data_array_create();
-	for (const auto &cell : t.cells) {
-		obs_data_t *cellData = CellToData(cell);
-		obs_data_array_push_back(cellsArray, cellData);
-		obs_data_release(cellData);
-	}
-	obs_data_set_array(data, "cells", cellsArray);
-	obs_data_array_release(cellsArray);
-
-	return data;
+	QJsonObject obj;
+	obj["name"] = t.name;
+	obj["grid_rows"] = t.gridRows;
+	obj["grid_cols"] = t.gridCols;
+	obj["preserve_sources"] = t.preserveSources;
+	obj["cells"] = CellsToJson(t.cells);
+	return obj;
 }
 
-TemplateConfig TemplateFromData(obs_data_t *data)
+TemplateConfig TemplateFromJson(const QJsonObject &obj)
 {
+	const TemplateConfig defaults;
 	TemplateConfig t;
-	t.name = QString::fromUtf8(obs_data_get_string(data, "name"));
-	t.gridRows = (int)obs_data_get_int(data, "grid_rows");
-	t.gridCols = (int)obs_data_get_int(data, "grid_cols");
-	t.preserveSources = obs_data_get_bool(data, "preserve_sources");
-	if (t.gridRows <= 0)
-		t.gridRows = 4;
-	if (t.gridCols <= 0)
-		t.gridCols = 4;
-
-	obs_data_array_t *cellsArray = obs_data_get_array(data, "cells");
-	if (cellsArray) {
-		size_t count = obs_data_array_count(cellsArray);
-		for (size_t i = 0; i < count; i++) {
-			obs_data_t *cellData = obs_data_array_item(cellsArray, i);
-			t.cells.append(CellFromData(cellData));
-			obs_data_release(cellData);
-		}
-		obs_data_array_release(cellsArray);
-	}
-
+	t.name = obj.value("name").toString().trimmed();
+	t.gridRows = IntFromJson(obj, "grid_rows", defaults.gridRows);
+	t.gridCols = IntFromJson(obj, "grid_cols", defaults.gridCols);
+	t.preserveSources = obj.value("preserve_sources").toBool(defaults.preserveSources);
+	t.cells = CellsFromJson(obj.value("cells"));
+	SanitizeGrid(t.gridRows, t.gridCols, t.cells);
 	return t;
+}
+
+QJsonObject MultiviewsToJson(const QVector<MultiviewConfig> &multiviews)
+{
+	QJsonArray array;
+	for (const MultiviewConfig &mv : multiviews)
+		array.append(MultiviewToJson(mv));
+
+	QJsonObject root;
+	root["version"] = kSchemaVersion;
+	root["multiviews"] = array;
+	return root;
+}
+
+QVector<MultiviewConfig> MultiviewsFromJson(const QJsonObject &root)
+{
+	QVector<MultiviewConfig> result;
+	QSet<QString> ids;
+	QSet<QString> names;
+
+	const QJsonArray array = root.value("multiviews").toArray();
+	for (const QJsonValue &item : array) {
+		MultiviewConfig mv = MultiviewFromJson(item.toObject());
+		if (mv.name.isEmpty() || names.contains(mv.name))
+			continue;
+		if (mv.id.isEmpty() || ids.contains(mv.id))
+			mv.id = NewId();
+
+		names.insert(mv.name);
+		ids.insert(mv.id);
+		result.append(mv);
+	}
+	return result;
+}
+
+QJsonObject TemplatesToJson(const QVector<TemplateConfig> &templates)
+{
+	QJsonArray array;
+	for (const TemplateConfig &t : templates)
+		array.append(TemplateToJson(t));
+
+	QJsonObject root;
+	root["version"] = kSchemaVersion;
+	root["templates"] = array;
+	return root;
+}
+
+QVector<TemplateConfig> TemplatesFromJson(const QJsonObject &root)
+{
+	QVector<TemplateConfig> result;
+	QSet<QString> names;
+
+	const QJsonArray array = root.value("templates").toArray();
+	for (const QJsonValue &item : array) {
+		TemplateConfig t = TemplateFromJson(item.toObject());
+		if (t.name.isEmpty() || names.contains(t.name))
+			continue;
+		names.insert(t.name);
+		result.append(t);
+	}
+	return result;
 }
 
 } // namespace MultiviewSerializer

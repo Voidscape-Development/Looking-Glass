@@ -40,6 +40,7 @@ target_sources(
     src/plugin-main.cpp
     src/api/websocket-api.cpp
     src/core/multiview-config.cpp
+    src/core/grid-model.cpp
     src/core/config-manager.cpp
     src/ui/tools-menu.cpp
     src/ui/grid-editor-widget.cpp
@@ -47,7 +48,9 @@ target_sources(
     src/ui/multiview-edit-dialog.cpp
     src/ui/multiview-manage-dialog.cpp
     src/ui/template-manage-dialog.cpp
+    src/ui/multiview-display.cpp
     src/ui/multiview-window.cpp
+    src/render/live-state.cpp
     src/render/multiview-renderer.cpp
 )
 

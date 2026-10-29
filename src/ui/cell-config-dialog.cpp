@@ -31,6 +31,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QFontDialog>
 #include <QFontDatabase>
 #include <QColorDialog>
+#include <QPair>
 
 #include <algorithm>
 
@@ -191,8 +192,7 @@ void CellConfigDialog::updateTypeVisibility()
 	subtypeCombo_->setVisible(needsSelection);
 
 	// Status border only applies to types that can be in preview/program
-	bool canShowStatus =
-		(/*type == WidgetType::Preview || type == WidgetType::Program ||*/ type == WidgetType::Scene);
+	bool canShowStatus = type == WidgetType::Scene;
 	showStatusCheck_->setVisible(canShowStatus);
 }
 
@@ -248,45 +248,39 @@ void CellConfigDialog::populateSubtypes()
 
 	WidgetType type = (WidgetType)typeCombo_->currentData().toInt();
 
-	if (type == WidgetType::Scene) {
-		// Enumerate scenes
-		struct obs_frontend_source_list scenes = {};
-		obs_frontend_get_scenes(&scenes);
-		QStringList names;
-		for (size_t i = 0; i < scenes.sources.num; i++) {
-			const char *name = obs_source_get_name(scenes.sources.array[i]);
-			if (name)
-				names.append(QString::fromUtf8(name));
-		}
-		obs_frontend_source_list_free(&scenes);
-		names.sort(Qt::CaseInsensitive);
-		for (const QString &n : names)
-			subtypeCombo_->addItem(n);
-		subtypeCombo_->setEnabled(true);
-
-		// Select current
-		int idx = subtypeCombo_->findText(config_.sceneName);
-		if (idx >= 0)
-			subtypeCombo_->setCurrentIndex(idx);
-
-	} else if (type == WidgetType::Source) {
-		// Enumerate all sources
-		QStringList names;
-		auto enumCb = [](void *param, obs_source_t *source) -> bool {
-			auto *list = (QStringList *)param;
+	if (type == WidgetType::Scene || type == WidgetType::Source) {
+		// Each entry carries the source's UUID so the cell keeps pointing at
+		// it through renames
+		QVector<QPair<QString, QString>> entries; // name, uuid
+		auto add = [](void *param, obs_source_t *source) -> bool {
+			auto *list = static_cast<QVector<QPair<QString, QString>> *>(param);
 			const char *name = obs_source_get_name(source);
-			uint32_t flags = obs_source_get_output_flags(source);
-			if (name && (flags & OBS_SOURCE_VIDEO))
-				list->append(QString::fromUtf8(name));
+			if (name && (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO))
+				list->append({QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source))});
 			return true;
 		};
-		obs_enum_sources(enumCb, &names);
-		names.sort(Qt::CaseInsensitive);
-		for (const QString &n : names)
-			subtypeCombo_->addItem(n);
+		if (type == WidgetType::Scene) {
+			struct obs_frontend_source_list scenes = {};
+			obs_frontend_get_scenes(&scenes);
+			for (size_t i = 0; i < scenes.sources.num; i++)
+				add(&entries, scenes.sources.array[i]);
+			obs_frontend_source_list_free(&scenes);
+		} else {
+			obs_enum_sources(add, &entries);
+		}
+
+		std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+			return QString::compare(a.first, b.first, Qt::CaseInsensitive) < 0;
+		});
+		for (const auto &entry : entries)
+			subtypeCombo_->addItem(entry.first, entry.second);
 		subtypeCombo_->setEnabled(true);
 
-		int idx = subtypeCombo_->findText(config_.sourceName);
+		// Select the current one, by UUID first and then by name
+		int idx = config_.sourceUuid.isEmpty() ? -1 : subtypeCombo_->findData(config_.sourceUuid);
+		if (idx < 0)
+			idx = subtypeCombo_->findText(type == WidgetType::Scene ? config_.sceneName
+										: config_.sourceName);
 		if (idx >= 0)
 			subtypeCombo_->setCurrentIndex(idx);
 
@@ -333,12 +327,15 @@ WidgetConfig CellConfigDialog::result() const
 	w.safeRegion = safeRegionCheck_->isChecked();
 	w.showStatus = showStatusCheck_->isChecked();
 
-	if (w.type == WidgetType::Scene)
+	if (w.type == WidgetType::Scene) {
 		w.sceneName = subtypeCombo_->currentText();
-	else if (w.type == WidgetType::Source)
+		w.sourceUuid = subtypeCombo_->currentData().toString();
+	} else if (w.type == WidgetType::Source) {
 		w.sourceName = subtypeCombo_->currentText();
-	else if (w.type == WidgetType::Canvas)
+		w.sourceUuid = subtypeCombo_->currentData().toString();
+	} else if (w.type == WidgetType::Canvas) {
 		w.canvasName = subtypeCombo_->currentData().toString();
+	}
 
 	return w;
 }

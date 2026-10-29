@@ -17,752 +17,186 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "multiview-renderer.hpp"
+#include "live-state.hpp"
+#include "../core/grid-model.hpp"
 #include "../plugin.hpp"
 
-#include <obs-frontend-api.h>
+#include <obs-module.h>
 #include <graphics/matrix4.h>
-#include <graphics/vec4.h>
 
+#include <QFile>
 #include <QFont>
 #include <QFontDatabase>
 #include <QImage>
 #include <QPainter>
-#include <QPainterPath>
 #include <QSvgRenderer>
 
+#include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
 
-#ifdef _WIN32
-#include <Windows.h>
-#endif
+// --- Frame: everything the graphics thread needs to draw one layout ---
 
-// Calculates scale factor and centered position to fit baseCX x baseCY
-// content inside a windowCX x windowCY area while preserving aspect ratio.
-static void GetScaleAndCenterPos(int baseCX, int baseCY, int windowCX, int windowCY, int &x, int &y, float &scale,
-				 int &scaledCX, int &scaledCY)
-{
-	double windowAspect = (double)windowCX / (double)windowCY;
-	double baseAspect = (double)baseCX / (double)baseCY;
+struct MultiviewRenderer::Cell {
+	CellConfig config;
 
-	if (windowAspect > baseAspect) {
-		// Height-constrained: scale to fit height, center horizontally
-		scale = (float)windowCY / (float)baseCY;
-		scaledCY = windowCY;
-		scaledCX = (int)std::round((double)baseCX * scale);
-		// Clamp to window width in case of rounding up
-		if (scaledCX > windowCX)
-			scaledCX = windowCX;
-	} else {
-		// Width-constrained: scale to fit width, center vertically
-		scale = (float)windowCX / (float)baseCX;
-		scaledCX = windowCX;
-		scaledCY = (int)std::round((double)baseCY * scale);
-		// Clamp to window height in case of rounding up
-		if (scaledCY > windowCY)
-			scaledCY = windowCY;
+	// Scene or source this cell displays. A weak reference lets the source be
+	// destroyed while the cell points at it; the matching
+	// obs_source_inc_showing() is undone when the Frame is destroyed.
+	obs_weak_source_t *shown = nullptr;
+
+	obs_source_t *label = nullptr; // Private text source
+	std::string canvasName;
+
+	// Graphics thread cache, recreated when the cell's pixel size changes
+	gs_texture_t *labelBg = nullptr;
+	int labelBgW = 0;
+	int labelBgH = 0;
+	gs_texture_t *placeholder = nullptr;
+	int placeholderSize = 0;
+};
+
+struct MultiviewRenderer::Frame {
+	int rows = 1;
+	int cols = 1;
+	int borderWidth = 1;
+	uint32_t lineColor = 0xFFFFFFFF;
+	QVector<int> owners; // GridModel::Ownership() of the cells
+	std::vector<Cell> cells;
+
+	Frame() = default;
+	Frame(const Frame &) = delete;
+	Frame &operator=(const Frame &) = delete;
+
+	// Runs on the UI thread, never while the Frame is being drawn
+	~Frame()
+	{
+		obs_enter_graphics();
+		for (Cell &cell : cells) {
+			if (cell.labelBg)
+				gs_texture_destroy(cell.labelBg);
+			if (cell.placeholder)
+				gs_texture_destroy(cell.placeholder);
+		}
+		obs_leave_graphics();
+
+		for (Cell &cell : cells) {
+			obs_source_release(cell.label);
+
+			// The source may already be gone; its showing count died with it.
+			// hide callbacks run here, outside the graphics context.
+			obs_source_t *source = obs_weak_source_get_source(cell.shown);
+			if (source) {
+				obs_source_dec_showing(source);
+				obs_source_release(source);
+			}
+			obs_weak_source_release(cell.shown);
+		}
 	}
+};
 
-	// Center the scaled content within the window area
-	int remainderX = windowCX - scaledCX;
-	int remainderY = windowCY - scaledCY;
-	x = remainderX / 2;
-	y = remainderY / 2;
-}
+struct MultiviewRenderer::CellRect {
+	int x = 0;
+	int y = 0;
+	int w = 0;
+	int h = 0;
+};
 
-CellRenderer::CellRenderer() {}
+namespace {
 
-CellRenderer::~CellRenderer()
-{
-	cleanup();
-}
-
-void CellRenderer::init(QWidget *surface, const CellConfig &config)
-{
-	cleanup();
-
-	surface_ = surface;
-	config_ = config;
-
-	if (!surface_)
-		return;
-
-	// Skip display creation for None widgets to avoid unnecessary
-	// swap chain overhead. Each obs_display_t adds rendering cost
-	// even when the draw callback exits early.
-	if (config.widget.type == WidgetType::None)
-		return;
-
-	gs_init_data initData = {};
-	initData.cx = surface_->width();
-	initData.cy = surface_->height();
-	initData.format = GS_BGRA;
-
-#ifdef _WIN32
-	initData.window.hwnd = (HWND)surface_->winId();
-#elif defined(__APPLE__)
-	initData.window.view = (id)surface_->winId();
-#else
-	initData.window.id = surface_->winId();
-	initData.window.display = nullptr; // X11/Wayland
-#endif
-
-	display_ = obs_display_create(&initData, 0);
-	if (display_) {
-		obs_display_add_draw_callback(display_, DrawCallback, this);
-		obs_display_set_background_color(display_, 0x000000);
-	}
-
-	acquireShownSource();
-	createLabelSource();
-}
-
-void CellRenderer::cleanup()
-{
-	if (display_) {
-		obs_display_remove_draw_callback(display_, DrawCallback, this);
-		obs_display_destroy(display_);
-		display_ = nullptr;
-	}
-	releaseShownSource();
-	destroyLabelSource();
-	destroyLabelBgTexture();
-	destroyPlaceholderTexture();
-	destroySafeAreaGeometry();
-	surface_ = nullptr;
-}
-
-void CellRenderer::updateConfig(const CellConfig &config)
-{
-	config_ = config;
-	acquireShownSource();
-	updateLabelSource();
-}
-
-// --- Displayed scene/source references ---
-//
-// OBS only ticks and captures a source while something declares it visible.
-// Capture sources stop grabbing frames, media sources with "close file when
-// inactive" release their file, and browser sources with "shutdown when not
-// visible" tear down their renderer as soon as the showing count drops to
-// zero. A source that is not in the program or preview scene therefore has a
-// showing count of zero, and a multiview cell rendering it would freeze on the
-// last frame it happened to produce — or stay black if it never produced one.
-//
-// Holding obs_source_inc_showing() for as long as a cell displays a scene or
-// source is what OBS's own multiview and source projectors do, and is what
-// keeps offscreen cells live.
-
-QString CellRenderer::targetSourceName() const
-{
-	switch (config_.widget.type) {
-	case WidgetType::Scene:
-		return config_.widget.sceneName;
-	case WidgetType::Source:
-		return config_.widget.sourceName;
-	default:
-		return QString();
-	}
-}
-
-void CellRenderer::acquireShownSource()
-{
-	releaseShownSource();
-
-	QString name = targetSourceName();
-	if (name.isEmpty())
-		return;
-
-	obs_source_t *source = obs_get_source_by_name(name.toUtf8().constData());
-	if (!source)
-		return; // Picked up later via refreshShownSource() once it exists
-
-	// Show the source before publishing it, so the draw callback never sees a
-	// reference that is not yet counted. inc_showing runs outside the graphics
-	// context because it invokes the source's own show handler.
-	obs_source_inc_showing(source);
-	obs_weak_source_t *weak = obs_source_get_weak_source(source);
-	obs_source_release(source);
-
-	// shownSource_ is read by the draw callback on the graphics thread;
-	// entering the graphics context serializes the swap against it.
-	obs_enter_graphics();
-	shownSource_ = weak;
-	obs_leave_graphics();
-}
-
-void CellRenderer::releaseShownSource()
-{
-	// Only the Qt thread writes shownSource_, so this read needs no guard.
-	if (!shownSource_)
-		return;
-
-	obs_enter_graphics();
-	obs_weak_source_t *weak = shownSource_;
-	shownSource_ = nullptr;
-	obs_leave_graphics();
-
-	// The source may already be gone; the showing reference dies with it.
-	obs_source_t *source = obs_weak_source_get_source(weak);
-	if (source) {
-		obs_source_dec_showing(source);
-		obs_source_release(source);
-	}
-
-	obs_weak_source_release(weak);
-}
-
-void CellRenderer::refreshShownSource()
-{
-	obs_source_t *current = shownSource_ ? obs_weak_source_get_source(shownSource_) : nullptr;
-
-	if (current) {
-		// Still holding a live source under the configured name: nothing
-		// to do. Re-acquiring would needlessly hide and re-show it.
-		const char *currentName = obs_source_get_name(current);
-		bool matches = currentName && targetSourceName() == QString::fromUtf8(currentName);
-		obs_source_release(current);
-		if (matches)
-			return;
-	}
-
-	acquireShownSource();
-}
-
-void CellRenderer::resize(uint32_t width, uint32_t height)
-{
-	if (display_)
-		obs_display_resize(display_, width, height);
-}
-
-void CellRenderer::DrawCallback(void *data, uint32_t cx, uint32_t cy)
-{
-	auto *self = (CellRenderer *)data;
-	self->render(cx, cy);
-}
-
-void CellRenderer::render(uint32_t cx, uint32_t cy)
-{
-	if (cx == 0 || cy == 0)
-		return;
-
-	obs_source_t *source = nullptr;
-
-	switch (config_.widget.type) {
-	case WidgetType::Preview:
-		renderPreviewProgram(cx, cy, false);
-		renderLabel(cx, cy);
-		renderStatusBorder(cx, cy);
-		return;
-	case WidgetType::Program:
-		renderPreviewProgram(cx, cy, true);
-		renderLabel(cx, cy);
-		renderStatusBorder(cx, cy);
-		return;
-	case WidgetType::Canvas:
-		renderCanvas(cx, cy);
-		renderLabel(cx, cy);
-		return;
-	case WidgetType::Scene:
-	case WidgetType::Source:
-		// Render the exact source this cell is holding visible. Resolving
-		// through the cached weak reference also avoids a by-name lookup
-		// on every frame of every cell.
-		if (shownSource_)
-			source = obs_weak_source_get_source(shownSource_);
-		break;
-	case WidgetType::Placeholder:
-		renderPlaceholderIcon(cx, cy);
-		renderLabel(cx, cy);
-		return;
-	case WidgetType::None:
-	default:
-		return;
-	}
-
-	if (source) {
-		renderSource(source, cx, cy);
-		obs_source_release(source);
-	}
-	renderLabel(cx, cy);
-	renderStatusBorder(cx, cy);
-}
+// OBS multiview-style status colors (ARGB)
+constexpr uint32_t kPreviewColor = 0xFF00D000;
+constexpr uint32_t kProgramColor = 0xFFD00000;
 
 // Rec. ITU-R BT.1848-1 / EBU R 95 safe area constants
-#define OUTLINE_COLOR 0xFFD0D0D0
-#define LINE_LENGTH 0.1f
-#define ACTION_SAFE_PERCENT 0.035f
-#define GRAPHICS_SAFE_PERCENT 0.05f
-#define FOURBYTHREE_SAFE_PERCENT 0.1625f
+constexpr uint32_t kSafeAreaColor = 0xFFD0D0D0;
+constexpr float kLineLength = 0.1f;
+constexpr float kActionSafePercent = 0.035f;
+constexpr float kGraphicsSafePercent = 0.05f;
+constexpr float kFourByThreeSafePercent = 0.1625f;
 
-void CellRenderer::initSafeAreaGeometry()
+constexpr int kDefaultLabelPointSize = 36;
+
+struct FitRect {
+	int x = 0;
+	int y = 0;
+	int w = 0;
+	int h = 0;
+};
+
+// Largest rectangle with the base aspect ratio that fits inside the cell,
+// centered in it
+FitRect FitInside(uint32_t baseW, uint32_t baseH, int x, int y, int w, int h)
 {
-	// Build pre-built vertex buffers with normalized 0-1 coordinates,
-	// matching OBS Studio's InitSafeAreas() from display-helpers.hpp.
-	// Already in graphics context (called from draw callback).
+	FitRect fit;
+	double windowAspect = (double)w / (double)h;
+	double baseAspect = (double)baseW / (double)baseH;
 
-	// Action safe margin (3.5% inset)
-	gs_render_start(true);
-	gs_vertex2f(ACTION_SAFE_PERCENT, ACTION_SAFE_PERCENT);
-	gs_vertex2f(ACTION_SAFE_PERCENT, 1 - ACTION_SAFE_PERCENT);
-	gs_vertex2f(1 - ACTION_SAFE_PERCENT, 1 - ACTION_SAFE_PERCENT);
-	gs_vertex2f(1 - ACTION_SAFE_PERCENT, ACTION_SAFE_PERCENT);
-	gs_vertex2f(ACTION_SAFE_PERCENT, ACTION_SAFE_PERCENT);
-	actionSafeVb_ = gs_render_save();
-
-	// Graphics safe margin (5% inset)
-	gs_render_start(true);
-	gs_vertex2f(GRAPHICS_SAFE_PERCENT, GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(GRAPHICS_SAFE_PERCENT, 1 - GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(1 - GRAPHICS_SAFE_PERCENT, 1 - GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(1 - GRAPHICS_SAFE_PERCENT, GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(GRAPHICS_SAFE_PERCENT, GRAPHICS_SAFE_PERCENT);
-	graphicsSafeVb_ = gs_render_save();
-
-	// 4:3 safe area for widescreen
-	gs_render_start(true);
-	gs_vertex2f(FOURBYTHREE_SAFE_PERCENT, GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(1 - FOURBYTHREE_SAFE_PERCENT, GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(1 - FOURBYTHREE_SAFE_PERCENT, 1 - GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(FOURBYTHREE_SAFE_PERCENT, 1 - GRAPHICS_SAFE_PERCENT);
-	gs_vertex2f(FOURBYTHREE_SAFE_PERCENT, GRAPHICS_SAFE_PERCENT);
-	fourByThreeSafeVb_ = gs_render_save();
-
-	// Center tick marks
-	gs_render_start(true);
-	gs_vertex2f(0.0f, 0.5f);
-	gs_vertex2f(LINE_LENGTH, 0.5f);
-	leftLineVb_ = gs_render_save();
-
-	gs_render_start(true);
-	gs_vertex2f(0.5f, 0.0f);
-	gs_vertex2f(0.5f, LINE_LENGTH);
-	topLineVb_ = gs_render_save();
-
-	gs_render_start(true);
-	gs_vertex2f(1.0f, 0.5f);
-	gs_vertex2f(1 - LINE_LENGTH, 0.5f);
-	rightLineVb_ = gs_render_save();
-}
-
-void CellRenderer::destroySafeAreaGeometry()
-{
-	obs_enter_graphics();
-	gs_vertexbuffer_destroy(actionSafeVb_);
-	gs_vertexbuffer_destroy(graphicsSafeVb_);
-	gs_vertexbuffer_destroy(fourByThreeSafeVb_);
-	gs_vertexbuffer_destroy(leftLineVb_);
-	gs_vertexbuffer_destroy(topLineVb_);
-	gs_vertexbuffer_destroy(rightLineVb_);
-	obs_leave_graphics();
-	actionSafeVb_ = nullptr;
-	graphicsSafeVb_ = nullptr;
-	fourByThreeSafeVb_ = nullptr;
-	leftLineVb_ = nullptr;
-	topLineVb_ = nullptr;
-	rightLineVb_ = nullptr;
-}
-
-void CellRenderer::renderSafeAreas(int contentW, int contentH)
-{
-	// Lazily create vertex buffers on first use (already in graphics context)
-	if (!actionSafeVb_)
-		initSafeAreaGeometry();
-
-	// Scale matrix from normalized 0-1 coordinates to content dimensions
-	matrix4 transform;
-	matrix4_identity(&transform);
-	transform.x.x = (float)contentW;
-	transform.y.y = (float)contentH;
-
-	gs_matrix_push();
-	gs_matrix_mul(&transform);
-
-	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
-	gs_effect_set_color(color, OUTLINE_COLOR);
-
-	// Draw all six safe area elements in a single effect loop
-	while (gs_effect_loop(solid, "Solid")) {
-		gs_load_vertexbuffer(actionSafeVb_);
-		gs_draw(GS_LINESTRIP, 0, 0);
-
-		gs_load_vertexbuffer(graphicsSafeVb_);
-		gs_draw(GS_LINESTRIP, 0, 0);
-
-		gs_load_vertexbuffer(fourByThreeSafeVb_);
-		gs_draw(GS_LINESTRIP, 0, 0);
-
-		gs_load_vertexbuffer(leftLineVb_);
-		gs_draw(GS_LINESTRIP, 0, 0);
-
-		gs_load_vertexbuffer(topLineVb_);
-		gs_draw(GS_LINESTRIP, 0, 0);
-
-		gs_load_vertexbuffer(rightLineVb_);
-		gs_draw(GS_LINESTRIP, 0, 0);
+	if (windowAspect > baseAspect) {
+		// Height-constrained: fill the height, center horizontally
+		fit.h = h;
+		fit.w = std::min(w, (int)std::lround((double)baseW * h / baseH));
+	} else {
+		// Width-constrained: fill the width, center vertically
+		fit.w = w;
+		fit.h = std::min(h, (int)std::lround((double)baseH * w / baseW));
 	}
 
+	fit.x = x + (w - fit.w) / 2;
+	fit.y = y + (h - fit.h) / 2;
+	return fit;
+}
+
+// Solid rectangle in the current (pixel) coordinate space
+void FillRect(int x, int y, int w, int h, uint32_t color)
+{
+	if (w <= 0 || h <= 0)
+		return;
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), color);
+
+	gs_matrix_push();
+	gs_matrix_translate3f((float)x, (float)y, 0.0f);
+	while (gs_effect_loop(solid, "Solid"))
+		gs_draw_sprite(nullptr, 0, (uint32_t)w, (uint32_t)h);
 	gs_matrix_pop();
 }
 
-// OBS multiview-style status colors (ARGB)
-static const uint32_t previewColor = 0xFF00D000;
-static const uint32_t programColor = 0xFFD00000;
-
-void CellRenderer::renderStatusBorder(uint32_t cx, uint32_t cy)
+// Draws a straight-alpha texture at (x, y) in the current coordinate space
+void DrawTexture(gs_texture_t *texture, int x, int y, int w, int h)
 {
-	if (!config_.widget.showStatus)
-		return;
+	gs_blend_state_push();
+	gs_enable_blending(true);
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
 
-	// Determine border color based on widget type and current OBS state
-	uint32_t borderColor = 0;
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), texture);
 
-	switch (config_.widget.type) {
-	// case WidgetType::Preview:
-	// 	borderColor = previewColor;
-	// 	break;
-	// case WidgetType::Program:
-	// 	borderColor = programColor;
-	// 	break;
-	case WidgetType::Scene: {
-		if (config_.widget.sceneName.isEmpty())
-			return;
-		QByteArray nameUtf8 = config_.widget.sceneName.toUtf8();
+	gs_matrix_push();
+	gs_matrix_translate3f((float)x, (float)y, 0.0f);
+	while (gs_effect_loop(effect, "Draw"))
+		gs_draw_sprite(texture, 0, (uint32_t)w, (uint32_t)h);
+	gs_matrix_pop();
 
-		// Check if this scene is the current program scene
-		obs_source_t *programScene = obs_frontend_get_current_scene();
-		if (programScene) {
-			if (strcmp(obs_source_get_name(programScene), nameUtf8.constData()) == 0)
-				borderColor = programColor;
-			obs_source_release(programScene);
-		}
-
-		// Check if this scene is the current preview scene (studio mode)
-		if (!borderColor && obs_frontend_preview_program_mode_active()) {
-			obs_source_t *previewScene = obs_frontend_get_current_preview_scene();
-			if (previewScene) {
-				if (strcmp(obs_source_get_name(previewScene), nameUtf8.constData()) == 0)
-					borderColor = previewColor;
-				obs_source_release(previewScene);
-			}
-		}
-		break;
-	}
-	default:
-		return;
-	}
-
-	if (!borderColor)
-		return;
-
-	// Draw border as 4 filled strips around the cell edges
-	const int borderW = qMax(2, (int)(qMin(cx, cy) * 0.015f));
-
-	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
-	gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
-	gs_effect_set_color(color, borderColor);
-
-	gs_viewport_push();
-	gs_projection_push();
-	gs_set_viewport(0, 0, cx, cy);
-	gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
-
-	while (gs_effect_loop(solid, "Solid")) {
-		// Top strip
-		gs_draw_sprite(nullptr, 0, cx, borderW);
-
-		// Bottom strip
-		gs_matrix_push();
-		gs_matrix_translate3f(0.0f, (float)(cy - borderW), 0.0f);
-		gs_draw_sprite(nullptr, 0, cx, borderW);
-		gs_matrix_pop();
-
-		// Left strip
-		gs_matrix_push();
-		gs_matrix_translate3f(0.0f, (float)borderW, 0.0f);
-		gs_draw_sprite(nullptr, 0, borderW, cy - 2 * borderW);
-		gs_matrix_pop();
-
-		// Right strip
-		gs_matrix_push();
-		gs_matrix_translate3f((float)(cx - borderW), (float)borderW, 0.0f);
-		gs_draw_sprite(nullptr, 0, borderW, cy - 2 * borderW);
-		gs_matrix_pop();
-	}
-
-	gs_projection_pop();
-	gs_viewport_pop();
+	gs_blend_state_pop();
 }
 
-void CellRenderer::renderPreviewProgram(uint32_t cx, uint32_t cy, bool isProgram)
+// Uploads a QImage (any format) as a straight-alpha RGBA texture. Must be
+// called inside the graphics context.
+gs_texture_t *TextureFromImage(const QImage &image)
 {
-	// Get canvas dimensions
-	struct obs_video_info ovi;
-	if (!obs_get_video_info(&ovi))
-		return;
-
-	uint32_t canvasW = ovi.base_width;
-	uint32_t canvasH = ovi.base_height;
-
-	if (canvasW == 0 || canvasH == 0)
-		return;
-
-	// Calculate scale and offset to fit canvas in cell while maintaining aspect ratio
-	int offsetX, offsetY, scaledW, scaledH;
-	float scale;
-	GetScaleAndCenterPos(canvasW, canvasH, cx, cy, offsetX, offsetY, scale, scaledW, scaledH);
-
-	// Set up transform for rendering using calculated scaled dimensions
-	// Use viewport-based rendering for pixel-perfect centering
-	gs_viewport_push();
-	gs_projection_push();
-
-	gs_set_viewport(offsetX, offsetY, scaledW, scaledH);
-	gs_ortho(0.0f, (float)canvasW, 0.0f, (float)canvasH, -100.0f, 100.0f);
-
-	// Program always shows main output; Preview shows the preview scene
-	// in studio mode, otherwise falls back to main output
-	if (isProgram || !obs_frontend_preview_program_mode_active()) {
-		obs_render_main_texture();
-	} else {
-		obs_source_t *previewScene = obs_frontend_get_current_preview_scene();
-		if (previewScene) {
-			obs_source_video_render(previewScene);
-			obs_source_release(previewScene);
-		}
-	}
-
-	if (config_.widget.safeRegion)
-		renderSafeAreas(canvasW, canvasH);
-
-	gs_projection_pop();
-	gs_viewport_pop();
+	QImage rgba = image.convertToFormat(QImage::Format_RGBA8888);
+	const uint8_t *bits = rgba.constBits();
+	return gs_texture_create((uint32_t)rgba.width(), (uint32_t)rgba.height(), GS_RGBA, 1, &bits, 0);
 }
 
-void CellRenderer::renderCanvas(uint32_t cx, uint32_t cy)
+// QImage and QPainter may be used off the GUI thread as long as they paint
+// onto an image, so these run directly on the graphics thread
+gs_texture_t *CreateRoundedRectTexture(int w, int h, int radius, const QColor &color)
 {
-	// Get the canvas - either by name or the main canvas
-	obs_canvas_t *canvas = nullptr;
-	bool releaseCanvas = false;
-
-	if (!config_.widget.canvasName.isEmpty()) {
-		// Get canvas by name using OBS Canvas API
-		canvas = obs_get_canvas_by_name(config_.widget.canvasName.toUtf8().constData());
-		releaseCanvas = true;
-	} else {
-		// Use main canvas
-		canvas = obs_get_main_canvas();
-		releaseCanvas = true;
-	}
-
-	if (!canvas) {
-		// Fallback: render main texture if canvas not found
-		struct obs_video_info ovi;
-		if (!obs_get_video_info(&ovi))
-			return;
-
-		uint32_t canvasW = ovi.base_width;
-		uint32_t canvasH = ovi.base_height;
-		if (canvasW == 0 || canvasH == 0)
-			return;
-
-		int offsetX, offsetY, scaledW, scaledH;
-		float scale;
-		GetScaleAndCenterPos(canvasW, canvasH, cx, cy, offsetX, offsetY, scale, scaledW, scaledH);
-
-		gs_viewport_push();
-		gs_projection_push();
-		gs_set_viewport(offsetX, offsetY, scaledW, scaledH);
-		gs_ortho(0.0f, (float)canvasW, 0.0f, (float)canvasH, -100.0f, 100.0f);
-		obs_render_main_texture();
-		if (config_.widget.safeRegion)
-			renderSafeAreas(canvasW, canvasH);
-		gs_projection_pop();
-		gs_viewport_pop();
-		return;
-	}
-
-	// Get canvas video info for dimensions
-	struct obs_video_info ovi;
-	if (!obs_canvas_get_video_info(canvas, &ovi)) {
-		if (releaseCanvas)
-			obs_canvas_release(canvas);
-		return;
-	}
-
-	uint32_t canvasW = ovi.base_width;
-	uint32_t canvasH = ovi.base_height;
-
-	if (canvasW == 0 || canvasH == 0) {
-		if (releaseCanvas)
-			obs_canvas_release(canvas);
-		return;
-	}
-
-	// Calculate scale and offset to fit canvas in cell while maintaining aspect ratio
-	int offsetX, offsetY, scaledW, scaledH;
-	float scale;
-	GetScaleAndCenterPos(canvasW, canvasH, cx, cy, offsetX, offsetY, scale, scaledW, scaledH);
-
-	// Set up viewport for pixel-perfect centering
-	gs_viewport_push();
-	gs_projection_push();
-
-	gs_set_viewport(offsetX, offsetY, scaledW, scaledH);
-	gs_ortho(0.0f, (float)canvasW, 0.0f, (float)canvasH, -100.0f, 100.0f);
-
-	// Render the canvas texture using OBS Canvas API
-	obs_render_canvas_texture(canvas);
-
-	if (config_.widget.safeRegion)
-		renderSafeAreas(canvasW, canvasH);
-
-	gs_projection_pop();
-	gs_viewport_pop();
-
-	if (releaseCanvas)
-		obs_canvas_release(canvas);
-}
-
-void CellRenderer::renderSource(obs_source_t *source, uint32_t cx, uint32_t cy)
-{
-	uint32_t srcW = obs_source_get_width(source);
-	uint32_t srcH = obs_source_get_height(source);
-
-	if (srcW == 0 || srcH == 0)
-		return;
-
-	// Calculate scale to fit while maintaining aspect ratio
-	int offsetX, offsetY, scaledW, scaledH;
-	float scale;
-	GetScaleAndCenterPos(srcW, srcH, cx, cy, offsetX, offsetY, scale, scaledW, scaledH);
-
-	gs_viewport_push();
-	gs_projection_push();
-
-	gs_set_viewport(offsetX, offsetY, scaledW, scaledH);
-	gs_ortho(0.0f, (float)srcW, 0.0f, (float)srcH, -100.0f, 100.0f);
-
-	obs_source_video_render(source);
-
-	if (config_.widget.safeRegion)
-		renderSafeAreas(srcW, srcH);
-
-	gs_projection_pop();
-	gs_viewport_pop();
-}
-
-// --- Label text source management ---
-
-static const char *GetTextSourceId()
-{
-#ifdef _WIN32
-	return "text_gdiplus";
-#else
-	return "text_ft2_source";
-#endif
-}
-
-QString CellRenderer::resolveLabelText() const
-{
-	if (!config_.widget.labelVisible || config_.widget.type == WidgetType::None)
-		return QString();
-
-	if (!config_.widget.labelText.isEmpty())
-		return config_.widget.labelText;
-
-	switch (config_.widget.type) {
-	case WidgetType::Preview:
-		return QString::fromUtf8(LG_TEXT("Renderer.Preview"));
-	case WidgetType::Program:
-		return QString::fromUtf8(LG_TEXT("Renderer.Program"));
-	case WidgetType::Canvas:
-		return config_.widget.canvasName.isEmpty() ? QString::fromUtf8(LG_TEXT("Renderer.Canvas"))
-							   : config_.widget.canvasName;
-	case WidgetType::Scene:
-		return config_.widget.sceneName;
-	case WidgetType::Source:
-		return config_.widget.sourceName;
-	case WidgetType::Placeholder:
-		return QString::fromUtf8(LG_TEXT("Renderer.Placeholder"));
-	default:
-		return QString();
-	}
-}
-
-void CellRenderer::createLabelSource()
-{
-	destroyLabelSource();
-
-	QString text = resolveLabelText();
-	if (text.isEmpty())
-		return;
-
-	// Parse font from config (QFont::toString() format) or use default
-	QFont font;
-	if (!config_.widget.labelFont.isEmpty())
-		font.fromString(config_.widget.labelFont);
-	else
-		font.setPointSize(36);
-
-	obs_data_t *settings = obs_data_create();
-	obs_data_set_string(settings, "text", text.toUtf8().constData());
-	obs_data_set_string(settings, "font_face", font.family().toUtf8().constData());
-	obs_data_set_int(settings, "font_size", font.pointSize() > 0 ? font.pointSize() : 36);
-
-	// Build font flags bitmask (bit 0 = bold, bit 1 = italic)
-	int fontFlags = 0;
-	if (font.bold())
-		fontFlags |= 1;
-	if (font.italic())
-		fontFlags |= 2;
-
-	// Derive the full style name (e.g. "Light Italic", "SemiBold") from
-	// the font's weight and italic properties so sub-weights are preserved.
-	QString style = QFontDatabase::styleString(font);
-	if (style.isEmpty())
-		style = QStringLiteral("Regular");
-
-	obs_data_t *fontData = obs_data_create();
-	obs_data_set_string(fontData, "face", font.family().toUtf8().constData());
-	obs_data_set_int(fontData, "size", font.pointSize() > 0 ? font.pointSize() : 36);
-	obs_data_set_int(fontData, "flags", fontFlags);
-	obs_data_set_string(fontData, "style", style.toUtf8().constData());
-	obs_data_set_obj(settings, "font", fontData);
-	obs_data_release(fontData);
-
-	// White text with full opacity
-	obs_data_set_int(settings, "color1", 0xFFFFFFFF);
-	obs_data_set_int(settings, "color2", 0xFFFFFFFF);
-
-	labelSource_ = obs_source_create_private(GetTextSourceId(), "lg_label", settings);
-	obs_data_release(settings);
-}
-
-void CellRenderer::destroyLabelSource()
-{
-	if (labelSource_) {
-		obs_enter_graphics();
-		obs_source_release(labelSource_);
-		obs_leave_graphics();
-		labelSource_ = nullptr;
-	}
-}
-
-void CellRenderer::updateLabelSource()
-{
-	// Recreate the label source with updated config
-	createLabelSource();
-}
-
-// Creates a gs_texture from a QImage with a rounded rectangle filled with the
-// given color and alpha. The texture is w x h pixels with the specified corner radius.
-static gs_texture_t *CreateRoundedRectTexture(int w, int h, int radius, QColor color)
-{
-	if (w <= 0 || h <= 0)
-		return nullptr;
-
-	QImage img(w, h, QImage::Format_RGBA8888_Premultiplied);
+	QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
 	img.fill(Qt::transparent);
 
 	QPainter painter(&img);
@@ -772,238 +206,673 @@ static gs_texture_t *CreateRoundedRectTexture(int w, int h, int radius, QColor c
 	painter.drawRoundedRect(0, 0, w, h, radius, radius);
 	painter.end();
 
-	// Upload to GPU — obs_enter_graphics is already active in draw callback
-	const uint8_t *bits = img.constBits();
-	gs_texture_t *tex = gs_texture_create(w, h, GS_RGBA, 1, &bits, 0);
-	return tex;
+	return TextureFromImage(img);
 }
 
-void CellRenderer::renderLabel(uint32_t cx, uint32_t cy)
+gs_texture_t *CreateSvgTexture(const QByteArray &svg, int size)
 {
-	if (!labelSource_)
-		return;
+	QSvgRenderer renderer(svg);
+	if (!renderer.isValid())
+		return nullptr;
 
-	uint32_t labelW = obs_source_get_width(labelSource_);
-	uint32_t labelH = obs_source_get_height(labelSource_);
-
-	if (labelW == 0 || labelH == 0)
-		return;
-
-	// Scale the label proportionally to the cell size using the approach
-	// from OBS Studio's multiview. The label should occupy at most ~15%
-	// of the cell height and must fit within the cell width. The scale
-	// is capped at 1.0 so labels never upscale beyond their native size.
-	float maxH = (float)cy * 0.15f;
-	float heightScale = maxH / (float)labelH;
-	float widthScale = ((float)cx * 0.9f) / (float)labelW;
-	float scale = qMin(1.0f, qMin(heightScale, widthScale));
-
-	// Scaled label dimensions in cell pixels
-	int scaledW = qMax(1, (int)(labelW * scale));
-	int scaledH = qMax(1, (int)(labelH * scale));
-
-	// Scale padding proportionally
-	int padding = qMax(1, (int)(6.0f * scale));
-
-	// Calculate label position using scaled dimensions
-	int labelX = 0;
-	int labelY = 0;
-
-	// Horizontal alignment
-	Qt::Alignment hAlign = config_.widget.labelHAlign;
-	if (hAlign & Qt::AlignHCenter)
-		labelX = ((int)cx - scaledW) / 2;
-	else if (hAlign & Qt::AlignRight)
-		labelX = (int)cx - scaledW - padding;
-	else
-		labelX = padding;
-
-	// Vertical alignment
-	Qt::Alignment vAlign = config_.widget.labelVAlign;
-	if (vAlign & Qt::AlignVCenter)
-		labelY = ((int)cy - scaledH) / 2;
-	else if (vAlign & Qt::AlignBottom)
-		labelY = (int)cy - scaledH - padding;
-	else
-		labelY = padding;
-
-	// Draw rounded background rectangle behind the label if it has any opacity.
-	// The background texture is created at the scaled pixel size so it
-	// matches the label and is recreated when dimensions or color change.
-	QColor bgColor = config_.widget.labelBgColor;
-	if (bgColor.alpha() > 0) {
-		int bgPad = qMax(1, (int)(4.0f * scale));
-		int bgRadius = qMax(1, (int)(6.0f * scale));
-		int bgX = labelX - bgPad;
-		int bgY = labelY - bgPad;
-		int bgW = scaledW + 2 * bgPad;
-		int bgH = scaledH + 2 * bgPad;
-
-		// Recreate cached texture only when dimensions or color change
-		if (!labelBgTexture_ || labelBgTexW_ != bgW || labelBgTexH_ != bgH || labelBgTexColor_ != bgColor) {
-			if (labelBgTexture_) {
-				gs_texture_destroy(labelBgTexture_);
-				labelBgTexture_ = nullptr;
-			}
-			labelBgTexture_ = CreateRoundedRectTexture(bgW, bgH, bgRadius, bgColor);
-			labelBgTexW_ = bgW;
-			labelBgTexH_ = bgH;
-			labelBgTexColor_ = bgColor;
-		}
-
-		if (labelBgTexture_) {
-			gs_blend_state_push();
-			gs_enable_blending(true);
-			gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
-
-			gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-			gs_eparam_t *imageParam = gs_effect_get_param_by_name(effect, "image");
-			gs_effect_set_texture(imageParam, labelBgTexture_);
-
-			gs_viewport_push();
-			gs_projection_push();
-			gs_set_viewport(bgX, bgY, bgW, bgH);
-			gs_ortho(0.0f, (float)bgW, 0.0f, (float)bgH, -100.0f, 100.0f);
-
-			while (gs_effect_loop(effect, "Draw"))
-				gs_draw_sprite(labelBgTexture_, 0, bgW, bgH);
-
-			gs_projection_pop();
-			gs_viewport_pop();
-
-			gs_blend_state_pop();
-		}
-	}
-
-	// Render the text source scaled via viewport mapping: the viewport is
-	// set to the scaled pixel area while the ortho projection spans the
-	// original label dimensions, so the GPU performs the scaling.
-	gs_viewport_push();
-	gs_projection_push();
-
-	gs_set_viewport(labelX, labelY, scaledW, scaledH);
-	gs_ortho(0.0f, (float)labelW, 0.0f, (float)labelH, -100.0f, 100.0f);
-
-	obs_source_video_render(labelSource_);
-
-	gs_projection_pop();
-	gs_viewport_pop();
-}
-
-// --- Placeholder icon rendering ---
-
-void CellRenderer::setPlaceholderSvgPath(const QString &path)
-{
-	placeholderSvgPath_ = path;
-}
-
-// Called from the draw callback (graphics context already active)
-void CellRenderer::createPlaceholderTexture()
-{
-	// Destroy old texture directly (we're in graphics context)
-	if (placeholderTexture_) {
-		gs_texture_destroy(placeholderTexture_);
-		placeholderTexture_ = nullptr;
-		placeholderTexSize_ = 0;
-	}
-
-	if (placeholderSvgPath_.isEmpty())
-		return;
-
-	// Determine icon size: 50% of cell dimension, min 16px
-	int cellW = surface_ ? surface_->width() : 0;
-	int cellH = surface_ ? surface_->height() : 0;
-	int iconSize = qMin(cellW, cellH) / 2;
-	if (iconSize < 16)
-		iconSize = 16;
-
-	// Render SVG to QImage
-	QSvgRenderer svgRenderer(placeholderSvgPath_);
-	if (!svgRenderer.isValid())
-		return;
-
-	QImage img(iconSize, iconSize, QImage::Format_RGBA8888_Premultiplied);
+	QImage img(size, size, QImage::Format_ARGB32_Premultiplied);
 	img.fill(Qt::transparent);
+
 	QPainter painter(&img);
 	painter.setRenderHint(QPainter::Antialiasing);
 	painter.setRenderHint(QPainter::SmoothPixmapTransform);
-	svgRenderer.render(&painter);
+	renderer.render(&painter);
 	painter.end();
 
-	// Upload to GPU (already in graphics context)
-	const uint8_t *bits = img.constBits();
-	placeholderTexture_ = gs_texture_create(iconSize, iconSize, GS_RGBA, 1, &bits, 0);
-	placeholderTexSize_ = iconSize;
+	return TextureFromImage(img);
 }
 
-// Called from cleanup/destructor (graphics context may not be active)
-void CellRenderer::destroyPlaceholderTexture()
+const char *TextSourceId()
 {
-	if (placeholderTexture_) {
-		obs_enter_graphics();
-		gs_texture_destroy(placeholderTexture_);
-		obs_leave_graphics();
-		placeholderTexture_ = nullptr;
-		placeholderTexSize_ = 0;
+#ifdef _WIN32
+	return "text_gdiplus";
+#else
+	return "text_ft2_source";
+#endif
+}
+
+// Private text source used to draw a cell label. Labels are rendered by OBS,
+// so their size follows the cell rather than staying fixed in screen pixels.
+obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
+{
+	if (text.isEmpty())
+		return nullptr;
+
+	QFont font;
+	if (!fontString.isEmpty())
+		font.fromString(fontString);
+	else
+		font.setPointSize(kDefaultLabelPointSize);
+	int pointSize = font.pointSize() > 0 ? font.pointSize() : kDefaultLabelPointSize;
+
+	// Font flags bitmask: bit 0 = bold, bit 1 = italic
+	int fontFlags = 0;
+	if (font.bold())
+		fontFlags |= 1;
+	if (font.italic())
+		fontFlags |= 2;
+
+	// Full style name (e.g. "Light Italic", "SemiBold") so sub-weights survive
+	QString style = QFontDatabase::styleString(font);
+	if (style.isEmpty())
+		style = QStringLiteral("Regular");
+
+	obs_data_t *fontData = obs_data_create();
+	obs_data_set_string(fontData, "face", font.family().toUtf8().constData());
+	obs_data_set_int(fontData, "size", pointSize);
+	obs_data_set_int(fontData, "flags", fontFlags);
+	obs_data_set_string(fontData, "style", style.toUtf8().constData());
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "text", text.toUtf8().constData());
+	obs_data_set_obj(settings, "font", fontData);
+	// White text with full opacity
+	obs_data_set_int(settings, "color1", 0xFFFFFFFF);
+	obs_data_set_int(settings, "color2", 0xFFFFFFFF);
+	obs_data_release(fontData);
+
+	obs_source_t *source = obs_source_create_private(TextSourceId(), "lg_label", settings);
+	obs_data_release(settings);
+	return source;
+}
+
+// The scene or source a cell displays: by UUID first, then by name for
+// layouts that predate UUIDs or came from another collection's template
+obs_source_t *ResolveSource(const WidgetConfig &w)
+{
+	if (w.type != WidgetType::Scene && w.type != WidgetType::Source)
+		return nullptr;
+
+	obs_source_t *source = nullptr;
+	if (!w.sourceUuid.isEmpty())
+		source = obs_get_source_by_uuid(w.sourceUuid.toUtf8().constData());
+
+	QString name = w.targetName();
+	if (!source && !name.isEmpty())
+		source = obs_get_source_by_name(name.toUtf8().constData());
+	return source;
+}
+
+QString LabelText(const WidgetConfig &w, obs_source_t *resolved)
+{
+	if (!w.labelVisible || w.type == WidgetType::None)
+		return QString();
+
+	if (!w.labelText.isEmpty())
+		return w.labelText;
+
+	switch (w.type) {
+	case WidgetType::Preview:
+		return QString::fromUtf8(LG_TEXT("Renderer.Preview"));
+	case WidgetType::Program:
+		return QString::fromUtf8(LG_TEXT("Renderer.Program"));
+	case WidgetType::Canvas:
+		return w.canvasName.isEmpty() ? QString::fromUtf8(LG_TEXT("Renderer.Canvas")) : w.canvasName;
+	case WidgetType::Scene:
+	case WidgetType::Source:
+		// Follow the live name so the label tracks renames
+		return resolved ? QString::fromUtf8(obs_source_get_name(resolved)) : w.targetName();
+	case WidgetType::Placeholder:
+		return QString::fromUtf8(LG_TEXT("Renderer.Placeholder"));
+	default:
+		return QString();
 	}
 }
 
-// Called from cleanup/destructor (graphics context may not be active)
-void CellRenderer::destroyLabelBgTexture()
+} // namespace
+
+// --- UI thread ---
+
+MultiviewRenderer::MultiviewRenderer()
 {
-	if (labelBgTexture_) {
-		obs_enter_graphics();
-		gs_texture_destroy(labelBgTexture_);
-		obs_leave_graphics();
-		labelBgTexture_ = nullptr;
-		labelBgTexW_ = 0;
-		labelBgTexH_ = 0;
-		labelBgTexColor_ = QColor();
+	char *path = obs_module_file("looking-glass.svg");
+	if (path) {
+		QFile file(QString::fromUtf8(path));
+		if (file.open(QIODevice::ReadOnly))
+			placeholderSvg_ = file.readAll();
+		bfree(path);
 	}
 }
 
-void CellRenderer::renderPlaceholderIcon(uint32_t cx, uint32_t cy)
+MultiviewRenderer::~MultiviewRenderer()
 {
-	if (placeholderSvgPath_.isEmpty())
+	// The owning window detaches the draw callback before destroying this
+	swapFrame(nullptr);
+	destroySafeAreaGeometry();
+}
+
+void MultiviewRenderer::setConfig(const MultiviewConfig &config)
+{
+	config_ = config;
+	swapFrame(buildFrame(config_));
+}
+
+void MultiviewRenderer::refreshSources()
+{
+	// Only the UI thread replaces frame_, so it can be read here unlocked
+	if (!frame_)
 		return;
 
-	// Determine desired icon size for the current cell dimensions
-	int desiredSize = qMin((int)cx, (int)cy) / 2;
-	if (desiredSize < 16)
-		desiredSize = 16;
+	bool changed = false;
+	for (const Cell &cell : frame_->cells) {
+		obs_source_t *source = ResolveSource(cell.config.widget);
+		bool same = source ? obs_weak_source_references_source(cell.shown, source) : !cell.shown;
+		obs_source_release(source);
+		if (!same) {
+			changed = true;
+			break;
+		}
+	}
 
-	// Recreate texture if size changed or not yet created
-	if (!placeholderTexture_ || placeholderTexSize_ != desiredSize)
-		createPlaceholderTexture();
+	if (changed)
+		setConfig(config_);
+}
 
-	if (!placeholderTexture_)
+void MultiviewRenderer::setPixelRatio(float ratio)
+{
+	pixelRatio_.store(ratio > 0.0f ? ratio : 1.0f);
+}
+
+std::unique_ptr<MultiviewRenderer::Frame> MultiviewRenderer::buildFrame(const MultiviewConfig &config) const
+{
+	auto frame = std::make_unique<Frame>();
+	frame->rows = std::max(1, config.gridRows);
+	frame->cols = std::max(1, config.gridCols);
+	frame->borderWidth = config.gridBorderWidth;
+	frame->lineColor = config.gridLineColor.rgba();
+	frame->owners = GridModel::Ownership(frame->rows, frame->cols, config.cells);
+	frame->cells.resize(config.cells.size());
+
+	for (int i = 0; i < (int)config.cells.size(); i++) {
+		Cell &cell = frame->cells[i];
+		cell.config = config.cells[i];
+		const WidgetConfig &w = cell.config.widget;
+
+		obs_source_t *source = ResolveSource(w);
+		if (source) {
+			// OBS only renders and captures a source while something
+			// declares it visible. Without this, a scene or source that is
+			// in neither program nor preview would freeze in its cell, the
+			// same reason OBS's own multiview and projectors hold it.
+			obs_source_inc_showing(source);
+			cell.shown = obs_source_get_weak_source(source);
+		}
+
+		cell.label = CreateLabelSource(LabelText(w, source), w.labelFont);
+		cell.canvasName = w.canvasName.toStdString();
+		obs_source_release(source);
+	}
+
+	return frame;
+}
+
+void MultiviewRenderer::swapFrame(std::unique_ptr<Frame> next)
+{
+	// The new Frame is fully built (and its sources shown) before the old one
+	// is released, so a source shown by both never drops to a showing count of
+	// zero and is not needlessly deactivated in between
+	std::unique_ptr<Frame> old;
+	{
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		old = std::move(frame_);
+		frame_ = std::move(next);
+	}
+	old.reset();
+}
+
+// --- Graphics thread ---
+
+void MultiviewRenderer::Draw(void *data, uint32_t cx, uint32_t cy)
+{
+	static_cast<MultiviewRenderer *>(data)->render(cx, cy);
+}
+
+void MultiviewRenderer::render(uint32_t cx, uint32_t cy)
+{
+	std::lock_guard<std::mutex> lock(frameMutex_);
+	Frame *frame = frame_.get();
+	if (!frame || cx == 0 || cy == 0)
 		return;
 
-	int iconW = placeholderTexSize_;
-	int iconH = placeholderTexSize_;
+	const int totalW = (int)cx;
+	const int totalH = (int)cy;
+	const float ratio = pixelRatio_.load();
+	const int border = std::max(1, (int)std::lround(frame->borderWidth * ratio));
 
-	// Center the icon in the cell
-	int iconX = ((int)cx - iconW) / 2;
-	int iconY = ((int)cy - iconH) / 2;
+	// Grid lines are centered on cell boundaries, so the outer ones bleed
+	// half their width outward. Reserve room for that on every side.
+	const int outerHalf = (border + 1) / 2;
+	const int availableW = totalW - 2 * outerHalf;
+	const int availableH = totalH - 2 * outerHalf;
+	if (availableW <= 0 || availableH <= 0)
+		return;
 
-	gs_blend_state_push();
-	gs_enable_blending(true);
-	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	// Every cell keeps a 16:9 shape
+	float gridAspect = (float)(frame->cols * 16) / (float)(frame->rows * 9);
+	int gridW, gridH;
+	if ((float)availableW / (float)availableH > gridAspect) {
+		gridH = availableH;
+		gridW = (int)(gridH * gridAspect);
+	} else {
+		gridW = availableW;
+		gridH = (int)(gridW / gridAspect);
+	}
 
-	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	gs_eparam_t *imageParam = gs_effect_get_param_by_name(effect, "image");
-	gs_effect_set_texture(imageParam, placeholderTexture_);
+	// Keep the leftover margin even so the grid centers exactly
+	if ((totalW - gridW) % 2 != 0)
+		gridW--;
+	if ((totalH - gridH) % 2 != 0)
+		gridH--;
+
+	// Cell boundaries are rounded individually from float sizes, spreading
+	// sub-pixel remainders across cells instead of into the margins
+	const float cellW = (float)gridW / frame->cols;
+	const float cellH = (float)gridH / frame->rows;
+	const int offsetX = (totalW - gridW) / 2;
+	const int offsetY = (totalH - gridH) / 2;
+
+	// Cells sit inside the grid lines. For a line of width W, floor(W/2) is
+	// the ideal inset, but never less than 1 so a 1px line stays visible.
+	const int inset = std::max(1, border / 2);
+
+	LiveState::Sources live;
+	LiveState::Acquire(live);
 
 	gs_viewport_push();
 	gs_projection_push();
-	gs_set_viewport(iconX, iconY, iconW, iconH);
-	gs_ortho(0.0f, (float)iconW, 0.0f, (float)iconH, -100.0f, 100.0f);
+	gs_set_viewport(0, 0, totalW, totalH);
+	gs_ortho(0.0f, (float)totalW, 0.0f, (float)totalH, -100.0f, 100.0f);
 
-	while (gs_effect_loop(effect, "Draw"))
-		gs_draw_sprite(placeholderTexture_, 0, iconW, iconH);
+	drawGridLines(*frame, offsetX, offsetY, cellW, cellH, inset);
+
+	for (Cell &cell : frame->cells) {
+		const CellConfig &c = cell.config;
+		int x0 = (int)std::lround(c.col * cellW);
+		int x1 = (int)std::lround((c.col + c.colSpan) * cellW);
+		int y0 = (int)std::lround(c.row * cellH);
+		int y1 = (int)std::lround((c.row + c.rowSpan) * cellH);
+
+		CellRect rect;
+		rect.x = offsetX + x0 + inset;
+		rect.y = offsetY + y0 + inset;
+		rect.w = (x1 - x0) - 2 * inset;
+		rect.h = (y1 - y0) - 2 * inset;
+		if (rect.w < 1 || rect.h < 1)
+			continue;
+
+		drawCell(cell, rect, live);
+	}
 
 	gs_projection_pop();
 	gs_viewport_pop();
+}
 
-	gs_blend_state_pop();
+void MultiviewRenderer::drawGridLines(const Frame &frame, int offsetX, int offsetY, float cellW, float cellH, int inset)
+{
+	const int rows = frame.rows;
+	const int cols = frame.cols;
+	const int thick = 2 * inset;
+	const int gridW = (int)std::lround(cols * cellW);
+	const int gridH = (int)std::lround(rows * cellH);
+	auto owner = [&](int r, int c) {
+		return frame.owners[r * cols + c];
+	};
+
+	// Vertical lines: outer edges in full, interior lines only where the
+	// cells on either side differ (merged cells have no line through them)
+	for (int col = 0; col <= cols; col++) {
+		int lineX = offsetX + (int)std::lround(col * cellW) - inset;
+
+		if (col == 0 || col == cols) {
+			FillRect(lineX, offsetY - inset, thick, gridH + thick, frame.lineColor);
+			continue;
+		}
+
+		int start = -1;
+		for (int row = 0; row <= rows; row++) {
+			bool needLine = row < rows && owner(row, col - 1) != owner(row, col);
+			if (needLine && start < 0) {
+				start = row;
+			} else if (!needLine && start >= 0) {
+				int y0 = (int)std::lround(start * cellH);
+				int y1 = (int)std::lround(row * cellH);
+				FillRect(lineX, offsetY + y0 - inset, thick, (y1 - y0) + thick, frame.lineColor);
+				start = -1;
+			}
+		}
+	}
+
+	// Horizontal lines, same rules
+	for (int row = 0; row <= rows; row++) {
+		int lineY = offsetY + (int)std::lround(row * cellH) - inset;
+
+		if (row == 0 || row == rows) {
+			FillRect(offsetX - inset, lineY, gridW + thick, thick, frame.lineColor);
+			continue;
+		}
+
+		int start = -1;
+		for (int col = 0; col <= cols; col++) {
+			bool needLine = col < cols && owner(row - 1, col) != owner(row, col);
+			if (needLine && start < 0) {
+				start = col;
+			} else if (!needLine && start >= 0) {
+				int x0 = (int)std::lround(start * cellW);
+				int x1 = (int)std::lround(col * cellW);
+				FillRect(offsetX + x0 - inset, lineY, (x1 - x0) + thick, thick, frame.lineColor);
+				start = -1;
+			}
+		}
+	}
+}
+
+void MultiviewRenderer::drawCell(Cell &cell, const CellRect &rect, const LiveState::Sources &live)
+{
+	const WidgetConfig &w = cell.config.widget;
+	obs_source_t *shown = nullptr;
+
+	switch (w.type) {
+	case WidgetType::Preview:
+		// The studio-mode preview scene, or the program output outside
+		// studio mode
+		if (live.studioMode && live.preview)
+			drawContent(live.preview, rect, w.safeRegion);
+		else
+			drawMainTexture(rect, w.safeRegion);
+		break;
+	case WidgetType::Program:
+		drawMainTexture(rect, w.safeRegion);
+		break;
+	case WidgetType::Canvas:
+		drawCanvas(cell, rect);
+		break;
+	case WidgetType::Scene:
+	case WidgetType::Source:
+		shown = obs_weak_source_get_source(cell.shown);
+		if (shown)
+			drawContent(shown, rect, w.safeRegion);
+		break;
+	case WidgetType::Placeholder:
+		drawPlaceholder(cell, rect);
+		break;
+	case WidgetType::None:
+	default:
+		return;
+	}
+
+	drawLabel(cell, rect);
+	drawStatusBorder(cell, shown, rect, live);
+	obs_source_release(shown);
+}
+
+// Content is drawn in its own viewport, scaled to fit the cell with its aspect
+// ratio preserved. The viewport also clips anything a scene draws outside its
+// own bounds, so it cannot bleed into neighbouring cells.
+void MultiviewRenderer::drawContent(obs_source_t *source, const CellRect &rect, bool safeAreas)
+{
+	uint32_t baseW = obs_source_get_width(source);
+	uint32_t baseH = obs_source_get_height(source);
+	if (baseW == 0 || baseH == 0)
+		return;
+
+	FitRect fit = FitInside(baseW, baseH, rect.x, rect.y, rect.w, rect.h);
+
+	gs_viewport_push();
+	gs_projection_push();
+	gs_set_viewport(fit.x, fit.y, fit.w, fit.h);
+	gs_ortho(0.0f, (float)baseW, 0.0f, (float)baseH, -100.0f, 100.0f);
+
+	obs_source_video_render(source);
+	if (safeAreas)
+		drawSafeAreas(baseW, baseH);
+
+	gs_projection_pop();
+	gs_viewport_pop();
+}
+
+void MultiviewRenderer::drawMainTexture(const CellRect &rect, bool safeAreas)
+{
+	struct obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || ovi.base_width == 0 || ovi.base_height == 0)
+		return;
+
+	FitRect fit = FitInside(ovi.base_width, ovi.base_height, rect.x, rect.y, rect.w, rect.h);
+
+	gs_viewport_push();
+	gs_projection_push();
+	gs_set_viewport(fit.x, fit.y, fit.w, fit.h);
+	gs_ortho(0.0f, (float)ovi.base_width, 0.0f, (float)ovi.base_height, -100.0f, 100.0f);
+
+	obs_render_main_texture();
+	if (safeAreas)
+		drawSafeAreas(ovi.base_width, ovi.base_height);
+
+	gs_projection_pop();
+	gs_viewport_pop();
+}
+
+void MultiviewRenderer::drawCanvas(const Cell &cell, const CellRect &rect)
+{
+	obs_canvas_t *canvas = cell.canvasName.empty() ? obs_get_main_canvas()
+						       : obs_get_canvas_by_name(cell.canvasName.c_str());
+	if (!canvas) {
+		// A named canvas that no longer exists falls back to the main output
+		drawMainTexture(rect, cell.config.widget.safeRegion);
+		return;
+	}
+
+	struct obs_video_info ovi;
+	if (obs_canvas_get_video_info(canvas, &ovi) && ovi.base_width > 0 && ovi.base_height > 0) {
+		FitRect fit = FitInside(ovi.base_width, ovi.base_height, rect.x, rect.y, rect.w, rect.h);
+
+		gs_viewport_push();
+		gs_projection_push();
+		gs_set_viewport(fit.x, fit.y, fit.w, fit.h);
+		gs_ortho(0.0f, (float)ovi.base_width, 0.0f, (float)ovi.base_height, -100.0f, 100.0f);
+
+		obs_render_canvas_texture(canvas);
+		if (cell.config.widget.safeRegion)
+			drawSafeAreas(ovi.base_width, ovi.base_height);
+
+		gs_projection_pop();
+		gs_viewport_pop();
+	}
+
+	obs_canvas_release(canvas);
+}
+
+void MultiviewRenderer::drawLabel(Cell &cell, const CellRect &rect)
+{
+	if (!cell.label)
+		return;
+
+	uint32_t labelW = obs_source_get_width(cell.label);
+	uint32_t labelH = obs_source_get_height(cell.label);
+	if (labelW == 0 || labelH == 0)
+		return;
+
+	// Fit the label to at most 15% of the cell height and 90% of its width,
+	// like OBS's own multiview. Never upscale past the label's native size,
+	// scaled up for HiDPI so labels keep their visual size there.
+	float maxScale = pixelRatio_.load();
+	float heightScale = (float)rect.h * 0.15f / (float)labelH;
+	float widthScale = (float)rect.w * 0.9f / (float)labelW;
+	float scale = std::min(maxScale, std::min(heightScale, widthScale));
+
+	int scaledW = std::max(1, (int)(labelW * scale));
+	int scaledH = std::max(1, (int)(labelH * scale));
+	int padding = std::max(1, (int)(6.0f * scale));
+
+	const WidgetConfig &w = cell.config.widget;
+	int labelX;
+	if (w.labelHAlign & Qt::AlignHCenter)
+		labelX = (rect.w - scaledW) / 2;
+	else if (w.labelHAlign & Qt::AlignRight)
+		labelX = rect.w - scaledW - padding;
+	else
+		labelX = padding;
+
+	int labelY;
+	if (w.labelVAlign & Qt::AlignVCenter)
+		labelY = (rect.h - scaledH) / 2;
+	else if (w.labelVAlign & Qt::AlignBottom)
+		labelY = rect.h - scaledH - padding;
+	else
+		labelY = padding;
+
+	labelX += rect.x;
+	labelY += rect.y;
+
+	// Rounded backing, cached at the size it is drawn at
+	if (w.labelBgColor.alpha() > 0) {
+		int bgPad = std::max(1, (int)(4.0f * scale));
+		int bgRadius = std::max(1, (int)(6.0f * scale));
+		int bgW = scaledW + 2 * bgPad;
+		int bgH = scaledH + 2 * bgPad;
+
+		if (!cell.labelBg || cell.labelBgW != bgW || cell.labelBgH != bgH) {
+			if (cell.labelBg)
+				gs_texture_destroy(cell.labelBg);
+			cell.labelBg = CreateRoundedRectTexture(bgW, bgH, bgRadius, w.labelBgColor);
+			cell.labelBgW = bgW;
+			cell.labelBgH = bgH;
+		}
+
+		if (cell.labelBg)
+			DrawTexture(cell.labelBg, labelX - bgPad, labelY - bgPad, bgW, bgH);
+	}
+
+	gs_matrix_push();
+	gs_matrix_translate3f((float)labelX, (float)labelY, 0.0f);
+	gs_matrix_scale3f(scale, scale, 1.0f);
+	obs_source_video_render(cell.label);
+	gs_matrix_pop();
+}
+
+void MultiviewRenderer::drawPlaceholder(Cell &cell, const CellRect &rect)
+{
+	if (placeholderSvg_.isEmpty())
+		return;
+
+	// Half the cell's shorter side, rasterized at exactly that size
+	int size = std::max(16, std::min(rect.w, rect.h) / 2);
+	if (!cell.placeholder || cell.placeholderSize != size) {
+		if (cell.placeholder)
+			gs_texture_destroy(cell.placeholder);
+		cell.placeholder = CreateSvgTexture(placeholderSvg_, size);
+		cell.placeholderSize = size;
+	}
+
+	if (cell.placeholder)
+		DrawTexture(cell.placeholder, rect.x + (rect.w - size) / 2, rect.y + (rect.h - size) / 2, size, size);
+}
+
+void MultiviewRenderer::drawStatusBorder(const Cell &cell, obs_source_t *shown, const CellRect &rect,
+					 const LiveState::Sources &live)
+{
+	const WidgetConfig &w = cell.config.widget;
+	if (!w.showStatus || w.type != WidgetType::Scene || !shown)
+		return;
+
+	// Red when on air in program, green when in the studio-mode preview
+	uint32_t color = 0;
+	if (shown == live.program)
+		color = kProgramColor;
+	else if (live.studioMode && shown == live.preview)
+		color = kPreviewColor;
+	if (!color)
+		return;
+
+	const int bw = std::max(2, (int)(std::min(rect.w, rect.h) * 0.015f));
+	FillRect(rect.x, rect.y, rect.w, bw, color);
+	FillRect(rect.x, rect.y + rect.h - bw, rect.w, bw, color);
+	FillRect(rect.x, rect.y + bw, bw, rect.h - 2 * bw, color);
+	FillRect(rect.x + rect.w - bw, rect.y + bw, bw, rect.h - 2 * bw, color);
+}
+
+// --- Safe areas ---
+
+void MultiviewRenderer::initSafeAreaGeometry()
+{
+	// Normalized 0-1 vertex buffers matching OBS Studio's InitSafeAreas()
+	// from display-helpers.hpp. Called from the draw callback, so the
+	// graphics context is already active.
+	auto box = [](float left, float top) {
+		gs_render_start(true);
+		gs_vertex2f(left, top);
+		gs_vertex2f(left, 1 - top);
+		gs_vertex2f(1 - left, 1 - top);
+		gs_vertex2f(1 - left, top);
+		gs_vertex2f(left, top);
+		return gs_render_save();
+	};
+	auto line = [](float x1, float y1, float x2, float y2) {
+		gs_render_start(true);
+		gs_vertex2f(x1, y1);
+		gs_vertex2f(x2, y2);
+		return gs_render_save();
+	};
+
+	actionSafeVb_ = box(kActionSafePercent, kActionSafePercent);
+	graphicsSafeVb_ = box(kGraphicsSafePercent, kGraphicsSafePercent);
+	fourByThreeSafeVb_ = box(kFourByThreeSafePercent, kGraphicsSafePercent);
+	leftLineVb_ = line(0.0f, 0.5f, kLineLength, 0.5f);
+	topLineVb_ = line(0.5f, 0.0f, 0.5f, kLineLength);
+	rightLineVb_ = line(1.0f, 0.5f, 1 - kLineLength, 0.5f);
+}
+
+void MultiviewRenderer::destroySafeAreaGeometry()
+{
+	if (!actionSafeVb_)
+		return;
+
+	obs_enter_graphics();
+	gs_vertexbuffer_destroy(actionSafeVb_);
+	gs_vertexbuffer_destroy(graphicsSafeVb_);
+	gs_vertexbuffer_destroy(fourByThreeSafeVb_);
+	gs_vertexbuffer_destroy(leftLineVb_);
+	gs_vertexbuffer_destroy(topLineVb_);
+	gs_vertexbuffer_destroy(rightLineVb_);
+	obs_leave_graphics();
+
+	actionSafeVb_ = nullptr;
+	graphicsSafeVb_ = nullptr;
+	fourByThreeSafeVb_ = nullptr;
+	leftLineVb_ = nullptr;
+	topLineVb_ = nullptr;
+	rightLineVb_ = nullptr;
+}
+
+void MultiviewRenderer::drawSafeAreas(uint32_t baseW, uint32_t baseH)
+{
+	if (!actionSafeVb_)
+		initSafeAreaGeometry();
+
+	// Scale the normalized geometry up to the content's base size
+	matrix4 transform;
+	matrix4_identity(&transform);
+	transform.x.x = (float)baseW;
+	transform.y.y = (float)baseH;
+
+	gs_matrix_push();
+	gs_matrix_mul(&transform);
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_effect_set_color(gs_effect_get_param_by_name(solid, "color"), kSafeAreaColor);
+
+	gs_vertbuffer_t *buffers[] = {actionSafeVb_, graphicsSafeVb_, fourByThreeSafeVb_,
+				      leftLineVb_,   topLineVb_,      rightLineVb_};
+	while (gs_effect_loop(solid, "Solid")) {
+		for (gs_vertbuffer_t *vb : buffers) {
+			gs_load_vertexbuffer(vb);
+			gs_draw(GS_LINESTRIP, 0, 0);
+		}
+	}
+
+	gs_matrix_pop();
 }

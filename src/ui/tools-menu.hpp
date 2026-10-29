@@ -42,12 +42,12 @@ private slots:
 	void onCreateNew();
 	void onManage();
 	void onManageTemplates();
-	void onOpenMultiview(const QString &name);
-	void onCloseMultiview(const QString &name);
-	void onEditMultiview(const QString &name);
-	void onSendToMainDisplay(const QString &name);
-	void onSetFullscreen(const QString &name, int screenIndex);
-	void onSetWindowed(const QString &name);
+	void onOpenMultiview(const QString &id);
+	void onCloseMultiview(const QString &id);
+	void onEditMultiview(const QString &id);
+	void onSendToMainDisplay(const QString &id);
+	void onSetFullscreen(const QString &id, int screenIndex);
+	void onSetWindowed(const QString &id);
 
 private:
 	QPointer<QMenu> submenu_;

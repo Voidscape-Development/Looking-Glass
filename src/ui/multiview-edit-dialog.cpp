@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "multiview-window.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
+#include "../core/grid-model.hpp"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -41,6 +42,14 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 {
 	setWindowTitle(isNew ? LG_TEXT("EditDialog.CreateTitle")
 			     : QString(LG_TEXT("EditDialog.EditTitle")).arg(config.name));
+
+	// New multiviews start from the built-in default template
+	if (config_.cells.isEmpty()) {
+		TemplateConfig def = GetConfigManager()->defaultTemplate();
+		config_.gridRows = def.gridRows;
+		config_.gridCols = def.gridCols;
+		config_.cells = def.cells;
+	}
 	setMinimumSize(800, 550);
 
 	auto *mainLayout = new QVBoxLayout(this);
@@ -82,15 +91,13 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 	// Grid size controls
 	auto *gridSettingsForm = new QFormLayout();
 	rowsSpin_ = new QSpinBox();
-	rowsSpin_->setRange(1, 16);
-	rowsSpin_->setValue(config_.cells.isEmpty() ? GetConfigManager()->defaultTemplate().gridRows
-						    : config_.gridRows);
+	rowsSpin_->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
+	rowsSpin_->setValue(config_.gridRows);
 	gridSettingsForm->addRow(LG_TEXT("EditDialog.Rows"), rowsSpin_);
 
 	colsSpin_ = new QSpinBox();
-	colsSpin_->setRange(1, 16);
-	colsSpin_->setValue(config_.cells.isEmpty() ? GetConfigManager()->defaultTemplate().gridCols
-						    : config_.gridCols);
+	colsSpin_->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
+	colsSpin_->setValue(config_.gridCols);
 	gridSettingsForm->addRow(LG_TEXT("EditDialog.Columns"), colsSpin_);
 
 	// Grid border width
@@ -143,14 +150,7 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 	mainLayout->addWidget(buttons);
 
-	// Load existing grid
-	if (!config_.cells.isEmpty()) {
-		gridEditor_->setGrid(config_.gridRows, config_.gridCols, config_.cells);
-	} else {
-		// Use default template for new multiviews
-		TemplateConfig def = GetConfigManager()->defaultTemplate();
-		gridEditor_->setGrid(def.gridRows, def.gridCols, def.cells);
-	}
+	gridEditor_->setGrid(config_.gridRows, config_.gridCols, config_.cells);
 
 	// Connections
 	connect(setWidgetBtn_, &QPushButton::clicked, this, &MultiviewEditDialog::onSetWidget);
@@ -242,25 +242,29 @@ void MultiviewEditDialog::onConfirm()
 		return;
 	}
 
-	if (isNew_ && GetConfigManager()->hasMultiview(name)) {
+	// The id identifies this multiview (empty while creating one), so keeping
+	// its own name, or renaming it, is never mistaken for a clash
+	ConfigManager *cm = GetConfigManager();
+	if (cm->isNameTaken(name, config_.id)) {
 		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("ManageDialog.MultiviewExists"));
 		return;
 	}
 
-	config_.name = name;
-	config_.gridRows = gridEditor_->gridRows();
-	config_.gridCols = gridEditor_->gridCols();
-	config_.gridBorderWidth = borderWidthSpin_->value();
-	config_.gridLineColor = gridLineColor_;
-	config_.cells = gridEditor_->cells();
+	if (!isNew_ && !cm->hasMultiview(config_.id)) {
+		// Deleted while this dialog was open
+		reject();
+		return;
+	}
 
-	ConfigManager *cm = GetConfigManager();
+	config_ = result();
+
 	if (isNew_) {
-		cm->addMultiview(config_);
 		// Auto-open the new multiview window
-		MultiviewWindow::openOrFocus(config_.name);
+		QString id = cm->addMultiview(config_);
+		MultiviewWindow::openOrFocus(id);
 	} else {
-		cm->updateMultiview(config_);
+		// Updates the name in place; open windows reload from the signal
+		cm->updateLayout(config_);
 	}
 
 	accept();
@@ -276,48 +280,9 @@ void MultiviewEditDialog::onGridSizeChanged()
 	if (newRows == oldRows && newCols == oldCols)
 		return;
 
-	// Keep cells that still fit, discard ones outside the new bounds
-	QVector<CellConfig> oldCells = gridEditor_->cells();
-	QVector<CellConfig> newCells;
-
-	// Build ownership map for existing cells
-	QVector<QVector<bool>> occupied(newRows);
-	for (int r = 0; r < newRows; r++)
-		occupied[r].resize(newCols, false);
-
-	for (const CellConfig &cell : oldCells) {
-		if (cell.row < newRows && cell.col < newCols) {
-			CellConfig c = cell;
-			// Clamp spans to fit
-			if (c.row + c.rowSpan > newRows)
-				c.rowSpan = newRows - c.row;
-			if (c.col + c.colSpan > newCols)
-				c.colSpan = newCols - c.col;
-			newCells.append(c);
-
-			// Mark positions as occupied
-			for (int r = c.row; r < c.row + c.rowSpan; r++) {
-				for (int col = c.col; col < c.col + c.colSpan; col++) {
-					occupied[r][col] = true;
-				}
-			}
-		}
-	}
-
-	// Create new empty cells for any unoccupied positions
-	for (int r = 0; r < newRows; r++) {
-		for (int c = 0; c < newCols; c++) {
-			if (!occupied[r][c]) {
-				CellConfig newCell;
-				newCell.row = r;
-				newCell.col = c;
-				newCell.rowSpan = 1;
-				newCell.colSpan = 1;
-				newCells.append(newCell);
-			}
-		}
-	}
-
+	// Keep cells that still fit, discard ones outside the new bounds, and
+	// fill uncovered positions with empty cells
+	QVector<CellConfig> newCells = GridModel::Resize(gridEditor_->cells(), newRows, newCols);
 	gridEditor_->setGrid(newRows, newCols, newCells);
 }
 
