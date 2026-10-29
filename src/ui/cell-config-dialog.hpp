@@ -26,6 +26,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPushButton>
 #include <QLabel>
 #include <QFont>
+#include <QSpinBox>
 
 #include "../core/multiview-config.hpp"
 
@@ -63,6 +64,7 @@ private:
 	QLineEdit *labelTextEdit_;
 	QPushButton *fontBtn_;
 	QLabel *fontPreviewLabel_;
+	QSpinBox *labelSizeSpin_;
 	QPushButton *bgColorBtn_;
 	QLabel *bgColorPreviewLabel_;
 	QComboBox *labelHAlignCombo_;

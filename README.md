@@ -13,7 +13,7 @@ driven remotely over obs-websocket.
 * **Any number of multiviews.** Create, duplicate, rename, and delete as many layouts as you need.
 * **Freeform grids.** 1–16 rows by 1–16 columns, with cells merged into arbitrary rectangular spans.
 * **Mixed content per cell.** Program, studio-mode preview, any scene, any video source, a named canvas, or a placeholder.
-* **Fully styled labels.** Per-cell text, font, size, background color and opacity, and nine-way alignment — rendered inside the OBS graphics pipeline, so they scale with the cell.
+* **Fully styled labels.** Per-cell text, font, size, background color and opacity, and nine-way alignment — rendered inside the OBS graphics pipeline and scaled with the cell like OBS's own multiview labels.
 * **Broadcast safe areas.** Optional EBU R 95 overlays (action safe, title safe, 4:3 inner safe, and a center crosshair) per cell.
 * **On-air tally.** Optional status border on scene cells: red for Program, green for Preview in studio mode.
 * **Reusable templates.** Save any layout as a template shared across scene collections, with or without its exact source and scene names.
@@ -94,7 +94,8 @@ Every cell has its own label settings:
 
 * **Show Label** toggles it entirely.
 * **Custom Text** overrides the label; leave it empty to use the source or scene name automatically (it updates when the scene or source is renamed).
-* **Font** picks family, style, and point size. Labels are drawn as OBS overlays, so the size scales with the cell rather than staying fixed in screen pixels.
+* **Font** picks the family and style.
+* **Size** sets how big the label is relative to its cell, from 25% to 400%. Labels scale with their cell the way OBS Studio's own multiview labels do: at 100% the text is about a tenth of the cell's height, whatever the window size. A label too long for its cell shrinks to fit the cell's width.
 * **Background** sets the label backing color, including opacity — the picker shows the resulting hex value and opacity percentage.
 * **Vertical** and **Horizontal** place the label in any of nine positions within the cell.
 

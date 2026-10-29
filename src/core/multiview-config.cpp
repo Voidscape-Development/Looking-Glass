@@ -220,6 +220,7 @@ QJsonObject WidgetToJson(const WidgetConfig &w)
 	obj["label_v_align"] = AlignVToString(w.labelVAlign);
 	obj["label_text"] = w.labelText;
 	obj["label_font"] = w.labelFont;
+	obj["label_size"] = w.labelSize;
 	obj["label_bg_color"] = w.labelBgColor.name(QColor::HexArgb);
 	obj["safe_region"] = w.safeRegion;
 	obj["show_status"] = w.showStatus;
@@ -243,6 +244,7 @@ WidgetConfig WidgetFromJson(const QJsonObject &obj)
 	w.labelVAlign = StringToAlignV(obj.value("label_v_align").toString());
 	w.labelText = obj.value("label_text").toString();
 	w.labelFont = obj.value("label_font").toString();
+	w.labelSize = std::clamp(IntFromJson(obj, "label_size", defaults.labelSize), kLabelSizeMin, kLabelSizeMax);
 	w.labelBgColor = ColorFromJson(obj.value("label_bg_color"), defaults.labelBgColor);
 	w.safeRegion = obj.value("safe_region").toBool(defaults.safeRegion);
 	w.showStatus = obj.value("show_status").toBool(defaults.showStatus);

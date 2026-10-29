@@ -64,6 +64,7 @@ MultiviewConfig SampleMultiview()
 	scene.widget.labelText = "Game";
 	scene.widget.labelFont = "Arial,24,-1,5,700,0,0,0,0,0,0,0,0,0,0,1";
 	scene.widget.labelBgColor = QColor(255, 0, 0, 64);
+	scene.widget.labelSize = 150;
 	scene.widget.safeRegion = true;
 	scene.widget.showStatus = true;
 	mv.cells.append(scene);
@@ -97,6 +98,7 @@ void CompareWidgets(const WidgetConfig &a, const WidgetConfig &b)
 	QCOMPARE(a.labelVAlign, b.labelVAlign);
 	QCOMPARE(a.labelText, b.labelText);
 	QCOMPARE(a.labelFont, b.labelFont);
+	QCOMPARE(a.labelSize, b.labelSize);
 	QCOMPARE(a.labelBgColor, b.labelBgColor);
 	QCOMPARE(a.safeRegion, b.safeRegion);
 	QCOMPARE(a.showStatus, b.showStatus);
@@ -150,6 +152,7 @@ private slots:
 		QCOMPARE(loaded.labelVAlign, defaults.labelVAlign);
 		QCOMPARE(loaded.labelVAlign, Qt::AlignBottom);
 		QCOMPARE(loaded.labelBgColor, defaults.labelBgColor);
+		QCOMPARE(loaded.labelSize, kLabelSizeDefault);
 		QCOMPARE(loaded.safeRegion, false);
 		QCOMPARE(loaded.showStatus, false);
 	}
@@ -161,6 +164,13 @@ private slots:
 		QCOMPARE(loaded.type, WidgetType::None);
 		QCOMPARE(loaded.labelBgColor, WidgetConfig().labelBgColor);
 		QCOMPARE(loaded.labelHAlign, Qt::AlignHCenter);
+	}
+
+	void labelSizeIsClamped()
+	{
+		QCOMPARE(WidgetFromJson(Parse("{\"label_size\": 9999}")).labelSize, kLabelSizeMax);
+		QCOMPARE(WidgetFromJson(Parse("{\"label_size\": 0}")).labelSize, kLabelSizeMin);
+		QCOMPARE(WidgetFromJson(Parse("{\"label_size\": 175}")).labelSize, 175);
 	}
 
 	void legacyVersionOneFile()

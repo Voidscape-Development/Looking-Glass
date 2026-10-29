@@ -39,6 +39,13 @@ enum class WidgetType {
 	Placeholder,
 };
 
+// Label size, as a percentage of the OBS multiview default. At 100% a label's
+// text is 1/9.81 of its cell's height, the proportion OBS Studio's own
+// multiview uses, and it scales with the cell like the content does.
+constexpr int kLabelSizeDefault = 100;
+constexpr int kLabelSizeMin = 25;
+constexpr int kLabelSizeMax = 400;
+
 // Per-cell display and label configuration
 struct WidgetConfig {
 	WidgetType type = WidgetType::None;
@@ -54,7 +61,8 @@ struct WidgetConfig {
 	Qt::Alignment labelHAlign = Qt::AlignHCenter;
 	Qt::Alignment labelVAlign = Qt::AlignBottom;
 	QString labelText;
-	QString labelFont;                          // QFont::toString() format
+	QString labelFont;                          // QFont::toString(); family and style only
+	int labelSize = kLabelSizeDefault;          // Percent, kLabelSizeMin..kLabelSizeMax
 	QColor labelBgColor = QColor(0, 0, 0, 128); // Label background color with alpha
 	bool safeRegion = false;                    // Draw broadcast safe area overlays
 	bool showStatus = false;                    // Show preview/program border indicator

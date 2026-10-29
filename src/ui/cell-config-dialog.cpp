@@ -32,6 +32,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QFontDatabase>
 #include <QColorDialog>
 #include <QPair>
+#include <QSpinBox>
 
 #include <algorithm>
 
@@ -40,13 +41,10 @@ CellConfigDialog::CellConfigDialog(const WidgetConfig &current, QWidget *parent)
 	setWindowTitle(LG_TEXT("CellDialog.Title"));
 	setMinimumSize(600, 400);
 
-	// Initialize font from config or use default
-	if (!config_.labelFont.isEmpty()) {
+	// The font supplies the family and style; the label's size is set
+	// separately, relative to the cell
+	if (!config_.labelFont.isEmpty())
 		selectedFont_.fromString(config_.labelFont);
-	} else {
-		selectedFont_ = QFont();
-		selectedFont_.setPointSize(36);
-	}
 
 	selectedBgColor_ = config_.labelBgColor;
 
@@ -110,6 +108,14 @@ CellConfigDialog::CellConfigDialog(const WidgetConfig &current, QWidget *parent)
 	fontLayout->addWidget(fontPreviewLabel_, 1);
 	fontLayout->addWidget(fontBtn_);
 	labelLayout->addRow(LG_TEXT("CellDialog.Font"), fontLayout);
+
+	labelSizeSpin_ = new QSpinBox();
+	labelSizeSpin_->setRange(kLabelSizeMin, kLabelSizeMax);
+	labelSizeSpin_->setSingleStep(5);
+	labelSizeSpin_->setSuffix(QStringLiteral("%"));
+	labelSizeSpin_->setValue(config_.labelSize);
+	labelSizeSpin_->setToolTip(LG_TEXT("CellDialog.LabelSizeTooltip"));
+	labelLayout->addRow(LG_TEXT("CellDialog.LabelSize"), labelSizeSpin_);
 
 	// Background color selection with preview
 	auto *bgColorLayout = new QHBoxLayout();
@@ -220,11 +226,13 @@ void CellConfigDialog::updateFontPreview()
 {
 	QString style = QFontDatabase::styleString(selectedFont_);
 
-	QString description =
-		QString("%1 %2 %3pt").arg(selectedFont_.family()).arg(style).arg(selectedFont_.pointSize());
+	fontPreviewLabel_->setText(QString("%1 %2").arg(selectedFont_.family()).arg(style));
 
-	fontPreviewLabel_->setText(description);
-	fontPreviewLabel_->setFont(selectedFont_);
+	// Preview the face at the dialog's own text size; the size picked in the
+	// font dialog is not used, since labels are sized relative to their cell
+	QFont preview = selectedFont_;
+	preview.setPointSizeF(font().pointSizeF());
+	fontPreviewLabel_->setFont(preview);
 }
 
 void CellConfigDialog::updateBgColorPreview()
@@ -323,6 +331,7 @@ WidgetConfig CellConfigDialog::result() const
 	w.labelVAlign = (Qt::Alignment)labelVAlignCombo_->currentData().toInt();
 	w.labelText = labelTextEdit_->text();
 	w.labelFont = selectedFont_.toString();
+	w.labelSize = labelSizeSpin_->value();
 	w.labelBgColor = selectedBgColor_;
 	w.safeRegion = safeRegionCheck_->isChecked();
 	w.showStatus = showStatusCheck_->isChecked();

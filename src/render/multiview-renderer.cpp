@@ -116,7 +116,14 @@ constexpr float kActionSafePercent = 0.035f;
 constexpr float kGraphicsSafePercent = 0.05f;
 constexpr float kFourByThreeSafePercent = 0.1625f;
 
-constexpr int kDefaultLabelPointSize = 36;
+// OBS Studio's multiview sizes label text at 1/9.81 of the cell height and
+// scales it along with the cell; Looking Glass uses the same proportion for a
+// label size of 100%
+constexpr float kLabelFontToCellHeight = 1.0f / 9.81f;
+
+// Labels are rasterized once at this font size and scaled when drawn. It sits
+// above the size labels usually end up at, so they are mostly scaled down.
+constexpr int kLabelRasterSize = 72;
 
 struct FitRect {
 	int x = 0;
@@ -236,8 +243,9 @@ const char *TextSourceId()
 #endif
 }
 
-// Private text source used to draw a cell label. Labels are rendered by OBS,
-// so their size follows the cell rather than staying fixed in screen pixels.
+// Private text source used to draw a cell label. The font contributes its
+// family and style; the size on screen is decided when drawing, relative to
+// the cell (see drawLabel()).
 obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
 {
 	if (text.isEmpty())
@@ -246,9 +254,6 @@ obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
 	QFont font;
 	if (!fontString.isEmpty())
 		font.fromString(fontString);
-	else
-		font.setPointSize(kDefaultLabelPointSize);
-	int pointSize = font.pointSize() > 0 ? font.pointSize() : kDefaultLabelPointSize;
 
 	// Font flags bitmask: bit 0 = bold, bit 1 = italic
 	int fontFlags = 0;
@@ -264,7 +269,7 @@ obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
 
 	obs_data_t *fontData = obs_data_create();
 	obs_data_set_string(fontData, "face", font.family().toUtf8().constData());
-	obs_data_set_int(fontData, "size", pointSize);
+	obs_data_set_int(fontData, "size", kLabelRasterSize);
 	obs_data_set_int(fontData, "flags", fontFlags);
 	obs_data_set_string(fontData, "style", style.toUtf8().constData());
 
@@ -696,19 +701,22 @@ void MultiviewRenderer::drawLabel(Cell &cell, const CellRect &rect)
 	if (labelW == 0 || labelH == 0)
 		return;
 
-	// Fit the label to at most 15% of the cell height and 90% of its width,
-	// like OBS's own multiview. Never upscale past the label's native size,
-	// scaled up for HiDPI so labels keep their visual size there.
-	float maxScale = pixelRatio_.load();
-	float heightScale = (float)rect.h * 0.15f / (float)labelH;
-	float widthScale = (float)rect.w * 0.9f / (float)labelW;
-	float scale = std::min(maxScale, std::min(heightScale, widthScale));
+	const WidgetConfig &w = cell.config.widget;
+
+	// Size the text relative to the cell, as OBS's multiview does, adjusted
+	// by the cell's label size. Cell sizes are in device pixels, so this
+	// also holds on HiDPI screens. A label too long for the cell is shrunk
+	// to fit its width rather than spilling into the neighbouring cells.
+	float fontPx = (float)rect.h * kLabelFontToCellHeight * (float)w.labelSize / 100.0f;
+	float scale = fontPx / (float)kLabelRasterSize;
+	scale = std::min(scale, (float)rect.w * 0.9f / (float)labelW);
 
 	int scaledW = std::max(1, (int)(labelW * scale));
 	int scaledH = std::max(1, (int)(labelH * scale));
-	int padding = std::max(1, (int)(6.0f * scale));
 
-	const WidgetConfig &w = cell.config.widget;
+	// Spacing follows the text size actually drawn
+	float textPx = (float)kLabelRasterSize * scale;
+	int padding = std::max(1, (int)std::lround(textPx * 0.25f));
 	int labelX;
 	if (w.labelHAlign & Qt::AlignHCenter)
 		labelX = (rect.w - scaledW) / 2;
@@ -730,8 +738,8 @@ void MultiviewRenderer::drawLabel(Cell &cell, const CellRect &rect)
 
 	// Rounded backing, cached at the size it is drawn at
 	if (w.labelBgColor.alpha() > 0) {
-		int bgPad = std::max(1, (int)(4.0f * scale));
-		int bgRadius = std::max(1, (int)(6.0f * scale));
+		int bgPad = std::max(1, (int)std::lround(textPx * 0.15f));
+		int bgRadius = std::max(1, (int)std::lround(textPx * 0.2f));
 		int bgW = scaledW + 2 * bgPad;
 		int bgH = scaledH + 2 * bgPad;
 

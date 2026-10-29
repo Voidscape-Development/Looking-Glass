@@ -25,7 +25,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QFont>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -333,9 +332,6 @@ TemplateConfig ConfigManager::defaultTemplate() const
 	t.gridRows = 4;
 	t.gridCols = 4;
 
-	QFont labelFont;
-	labelFont.setPointSize(20);
-
 	// Top half: 2x2 Preview on the left, 2x2 Program on the right
 	auto bigCell = [&](int col, WidgetType type, const char *labelKey) {
 		CellConfig cell;
@@ -345,7 +341,6 @@ TemplateConfig ConfigManager::defaultTemplate() const
 		cell.colSpan = 2;
 		cell.widget.type = type;
 		cell.widget.labelText = QString::fromUtf8(LG_TEXT(labelKey));
-		cell.widget.labelFont = labelFont.toString();
 		return cell;
 	};
 	t.cells.append(bigCell(0, WidgetType::Preview, "DefaultTemplate.Preview"));
