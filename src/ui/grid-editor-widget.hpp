@@ -64,14 +64,14 @@ protected:
 private:
 	QPoint gridPosFromPixel(const QPoint &pixel) const;
 	QRect cellRect(int row, int col, int rowSpan, int colSpan) const;
-	int cellIndexAt(int row, int col) const;
 	int ownerAt(int row, int col) const;
 	void rebuildOwnership();
+	void applyCells(const QVector<CellConfig> &cells);
 
 	int rows_ = 4;
 	int cols_ = 4;
 	QVector<CellConfig> cells_;
-	QVector<QVector<int>> ownership_; // [row][col] -> index into cells_, -1 = empty
+	QVector<int> ownership_; // GridModel::Ownership(): row-major cell index, -1 = empty
 
 	QSet<QPoint> selectedPositions_;
 	bool dragging_ = false;

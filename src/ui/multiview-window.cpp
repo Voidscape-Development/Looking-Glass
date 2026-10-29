@@ -20,348 +20,238 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "multiview-edit-dialog.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
+#include "../render/multiview-renderer.hpp"
 
-#include <obs-module.h>
-
-#include <QResizeEvent>
-#include <QMoveEvent>
 #include <QCloseEvent>
 #include <QContextMenuEvent>
-#include <QPaintEvent>
-#include <QPainter>
-#include <QMenu>
-#include <QScreen>
 #include <QGuiApplication>
-#include <QApplication>
-#include <QTimer>
-
-#include <utility>
+#include <QMenu>
+#include <QMoveEvent>
+#include <QResizeEvent>
+#include <QScreen>
+#include <QShowEvent>
 
 QMap<QString, MultiviewWindow *> MultiviewWindow::openWindows_;
+bool MultiviewWindow::preserveOpenStateOnClose_ = false;
 
-MultiviewWindow::MultiviewWindow(const QString &name, QWidget *parent) : QWidget(parent, Qt::Window), name_(name)
+namespace {
+
+constexpr int kDefaultWidth = 1280;
+constexpr int kDefaultHeight = 720;
+
+// Index of the monitor a fullscreen window should return to: by name, since
+// indices shift when monitors are added or removed, then by index
+int FindScreen(const WindowState &state)
+{
+	QList<QScreen *> screens = QGuiApplication::screens();
+	for (int i = 0; i < (int)screens.size(); i++) {
+		if (!state.screenName.isEmpty() && screens[i]->name() == state.screenName)
+			return i;
+	}
+	if (state.screenIndex >= 0 && state.screenIndex < (int)screens.size())
+		return state.screenIndex;
+	return -1;
+}
+
+QRect CenteredOnPrimaryScreen(int width, int height)
+{
+	QScreen *primary = QGuiApplication::primaryScreen();
+	if (!primary)
+		return QRect(100, 100, width, height);
+
+	QRect area = primary->availableGeometry();
+	return QRect(area.x() + (area.width() - width) / 2, area.y() + (area.height() - height) / 2, width, height);
+}
+
+} // namespace
+
+MultiviewWindow::MultiviewWindow(const QString &id)
+	: MultiviewDisplay(nullptr, Qt::Window),
+	  id_(id),
+	  renderer_(std::make_unique<MultiviewRenderer>())
 {
 	setAttribute(Qt::WA_DeleteOnClose);
+	setMinimumSize(160, 90);
 
-	config_ = GetConfigManager()->getMultiview(name);
+	ConfigManager *cm = GetConfigManager();
+	renderer_->setPixelRatio((float)devicePixelRatioF());
+	renderer_->setConfig(cm->getMultiview(id_));
+	setDrawCallback(&MultiviewRenderer::Draw, renderer_.get());
+
 	updateTitle();
+	restoreWindowState(cm->windowState(id_));
 
-	if (config_.geometry.isValid())
-		setGeometry(config_.geometry);
-	else
-		resize(1280, 720);
+	openWindows_[id_] = this;
 
-	buildGrid();
-
-	if (config_.fullscreen) {
-		int idx = config_.monitorId;
-		if (idx >= 0 && idx < QGuiApplication::screens().size())
-			setFullscreenOnMonitor(idx);
-	}
-
-	openWindows_[name] = this;
-
-	// Reload when config changes externally
-	connect(GetConfigManager(), &ConfigManager::multiviewUpdated, this, [this](const QString &updatedName) {
-		if (updatedName == name_ && !updatingConfig_)
+	connect(cm, &ConfigManager::multiviewUpdated, this, [this](const QString &updatedId) {
+		if (updatedId == id_)
 			reloadConfig();
 	});
-
-	// Mark as open
-	updatingConfig_ = true;
-	config_.wasOpen = true;
-	GetConfigManager()->updateMultiview(config_);
-	updatingConfig_ = false;
+	connect(cm, &ConfigManager::multiviewRenamed, this, [this](const QString &renamedId) {
+		if (renamedId == id_)
+			updateTitle();
+	});
+	connect(cm, &ConfigManager::multiviewRemoved, this, [this](const QString &removedId) {
+		if (removedId == id_)
+			close();
+	});
 }
 
 MultiviewWindow::~MultiviewWindow()
 {
-	for (CellRenderer *r : renderers_)
-		delete r;
-	renderers_.clear();
-	cellSurfaces_.clear();
+	// The draw callback points at renderer_, so the display must go first
+	destroyDisplay();
 
-	openWindows_.remove(name_);
-}
-
-void MultiviewWindow::setMultiviewName(const QString &name)
-{
-	openWindows_.remove(name_);
-	name_ = name;
-	openWindows_[name] = this;
-	updateTitle();
+	if (openWindows_.value(id_) == this)
+		openWindows_.remove(id_);
 }
 
 void MultiviewWindow::reloadConfig()
 {
-	config_ = GetConfigManager()->getMultiview(name_);
-	buildGrid();
-	updateLayout();
+	renderer_->setConfig(GetConfigManager()->getMultiview(id_));
+	updateTitle();
 }
 
-void MultiviewWindow::openOrFocus(const QString &name)
+// --- Static window management ---
+
+void MultiviewWindow::openOrFocus(const QString &id)
 {
-	if (openWindows_.contains(name)) {
-		MultiviewWindow *w = openWindows_[name];
+	if (MultiviewWindow *w = findById(id)) {
 		w->raise();
 		w->activateWindow();
 		return;
 	}
 
-	auto *w = new MultiviewWindow(name);
+	if (!GetConfigManager()->hasMultiview(id))
+		return;
+
+	auto *w = new MultiviewWindow(id);
 	w->show();
 }
 
-void MultiviewWindow::closeByName(const QString &name)
+void MultiviewWindow::closeById(const QString &id)
 {
-	if (openWindows_.contains(name)) {
-		openWindows_[name]->close();
-	}
+	if (MultiviewWindow *w = findById(id))
+		w->close();
 }
 
-void MultiviewWindow::closeAll()
+MultiviewWindow *MultiviewWindow::findById(const QString &id)
 {
-	QList<MultiviewWindow *> windows = openWindows_.values();
-	for (MultiviewWindow *w : windows)
+	return openWindows_.value(id, nullptr);
+}
+
+void MultiviewWindow::closeAll(bool preserveOpenState)
+{
+	preserveOpenStateOnClose_ = preserveOpenState;
+
+	// Delete outright rather than waiting for deferred deletion: this runs on
+	// scene collection switches and at exit, when the windows' sources must be
+	// released before OBS tears the collection (or itself) down
+	const QList<MultiviewWindow *> windows = openWindows_.values();
+	for (MultiviewWindow *w : windows) {
 		w->close();
+		delete w;
+	}
+
+	preserveOpenStateOnClose_ = false;
 }
 
 void MultiviewWindow::reopenPreviouslyOpen()
 {
-	QStringList names = GetConfigManager()->multiviewNames();
-	for (const QString &name : names) {
-		MultiviewConfig mv = GetConfigManager()->getMultiview(name);
-		if (mv.wasOpen)
-			openOrFocus(name);
+	for (const MultiviewConfig &mv : GetConfigManager()->multiviews()) {
+		if (mv.window.open)
+			openOrFocus(mv.id);
 	}
 }
 
-MultiviewWindow *MultiviewWindow::findByName(const QString &name)
+void MultiviewWindow::refreshSources()
 {
-	return openWindows_.value(name, nullptr);
+	for (MultiviewWindow *w : std::as_const(openWindows_))
+		w->renderer_->refreshSources();
 }
 
-// Cells resolve their scene/source by name and then hold it visible, so the
-// held reference has to follow the source list: a cell pointing at a source
-// that does not exist yet must pick it up when it is created, and one whose
-// source was renamed or removed must let go of it.
-void MultiviewWindow::connectSourceSignals()
+// --- Window state ---
+
+void MultiviewWindow::restoreWindowState(const WindowState &state)
 {
-	signal_handler_t *sh = obs_get_signal_handler();
-	if (!sh)
+	restoring_ = true;
+
+	// A window whose monitor is gone comes back centered on the primary one
+	QRect geometry = state.geometry.isValid() ? state.geometry : QRect(0, 0, kDefaultWidth, kDefaultHeight);
+	if (!QGuiApplication::screenAt(geometry.center()))
+		geometry = CenteredOnPrimaryScreen(geometry.width(), geometry.height());
+	setGeometry(geometry);
+
+	if (state.fullscreen) {
+		int screenIndex = FindScreen(state);
+		if (screenIndex >= 0)
+			setFullscreenOnMonitor(screenIndex);
+	}
+
+	restoring_ = false;
+}
+
+void MultiviewWindow::saveWindowState()
+{
+	if (restoring_)
 		return;
 
-	signal_handler_connect(sh, "source_create", OnSourceListChanged, nullptr);
-	signal_handler_connect(sh, "source_destroy", OnSourceListChanged, nullptr);
-	signal_handler_connect(sh, "source_rename", OnSourceListChanged, nullptr);
-}
+	ConfigManager *cm = GetConfigManager();
+	WindowState state = cm->windowState(id_);
+	if (!fullscreen_)
+		state.geometry = geometry();
+	state.fullscreen = fullscreen_;
 
-void MultiviewWindow::disconnectSourceSignals()
-{
-	signal_handler_t *sh = obs_get_signal_handler();
-	if (!sh)
-		return;
-
-	signal_handler_disconnect(sh, "source_create", OnSourceListChanged, nullptr);
-	signal_handler_disconnect(sh, "source_destroy", OnSourceListChanged, nullptr);
-	signal_handler_disconnect(sh, "source_rename", OnSourceListChanged, nullptr);
-}
-
-void MultiviewWindow::OnSourceListChanged(void *, calldata_t *)
-{
-	// Core signals fire on OBS threads. Hop to the Qt thread before touching
-	// window state, and post to the application object rather than to a
-	// window so a window closing concurrently cannot be used after free.
-	QMetaObject::invokeMethod(qApp, &MultiviewWindow::refreshSourceRefs, Qt::QueuedConnection);
-}
-
-void MultiviewWindow::refreshSourceRefs()
-{
-	for (MultiviewWindow *w : std::as_const(openWindows_)) {
-		for (CellRenderer *r : std::as_const(w->renderers_)) {
-			if (r)
-				r->refreshShownSource();
-		}
-	}
-}
-
-void MultiviewWindow::buildGrid()
-{
-	// Clean up existing renderers first (must destroy displays before surfaces)
-	for (CellRenderer *r : renderers_)
-		delete r;
-	renderers_.clear();
-	for (QWidget *s : cellSurfaces_)
-		delete s;
-	cellSurfaces_.clear();
-
-	// Get path to the placeholder icon
-	char *dataPath = obs_module_file("looking-glass.svg");
-	placeholderSvgPath_ = dataPath ? QString::fromUtf8(dataPath) : QString();
-	bfree(dataPath);
-
-	// Create surfaces for each cell (labels and icons are rendered by CellRenderer)
-	for (const CellConfig &cell : config_.cells) {
-		(void)cell;
-		auto *surface = new QWidget(this);
-		surface->setAttribute(Qt::WA_NativeWindow);
-		surface->setStyleSheet("background-color: transparent; border-radius: 6px;");
-		cellSurfaces_.append(surface);
-
-		// Reserve slot; actual renderer created in initRenderers() after surfaces are realized
-		renderers_.append(nullptr);
+	if (QScreen *current = screen()) {
+		state.screenName = current->name();
+		state.screenIndex = (int)QGuiApplication::screens().indexOf(current);
 	}
 
-	updateLayout();
-
-	// Show all surfaces so they get valid native window handles
-	for (QWidget *s : cellSurfaces_)
-		s->show();
-
-	// Defer obs_display creation until native windows are realized
-	QTimer::singleShot(50, this, &MultiviewWindow::initRenderers);
+	cm->setWindowState(id_, state);
 }
 
-void MultiviewWindow::initRenderers()
+void MultiviewWindow::setOpen(bool open)
 {
-	for (int i = 0; i < config_.cells.size() && i < cellSurfaces_.size(); i++) {
-		if (renderers_[i]) {
-			delete renderers_[i];
-			renderers_[i] = nullptr;
-		}
-
-		auto *renderer = new CellRenderer();
-		renderer->setPlaceholderSvgPath(placeholderSvgPath_);
-		renderer->init(cellSurfaces_[i], config_.cells[i]);
-		renderers_[i] = renderer;
-	}
+	ConfigManager *cm = GetConfigManager();
+	WindowState state = cm->windowState(id_);
+	state.open = open;
+	cm->setWindowState(id_, state);
 }
 
-void MultiviewWindow::calculateGridMetrics(int &gridW, int &gridH, int &offsetX, int &offsetY, float &cellW,
-					   float &cellH) const
+void MultiviewWindow::showEvent(QShowEvent *event)
 {
-	int totalW = width();
-	int totalH = height();
-
-	// QPainter draws lines centered on the coordinate. The outer grid lines
-	// sit at the grid edge, so half the pen width bleeds outward. Reserve
-	// enough margin on each side for that outward bleed.
-	int border = config_.gridBorderWidth;
-	int outerHalf = (border + 1) / 2; // ceil(border / 2)
-	int availableW = totalW - 2 * outerHalf;
-	int availableH = totalH - 2 * outerHalf;
-
-	// Calculate cell size maintaining 16:9 aspect ratio for the grid
-	float gridAspect = (float)(config_.gridCols * 16) / (float)(config_.gridRows * 9);
-	float availableAspect = (float)availableW / (float)availableH;
-
-	if (availableAspect > gridAspect) {
-		gridH = availableH;
-		gridW = (int)(gridH * gridAspect);
-	} else {
-		gridW = availableW;
-		gridH = (int)(gridW / gridAspect);
-	}
-
-	// Ensure the remaining margin can be split evenly for symmetric centering.
-	// If the remainder would be odd, shrink the grid by 1 pixel so both
-	// margins are exactly equal.
-	if ((totalW - gridW) % 2 != 0)
-		gridW--;
-	if ((totalH - gridH) % 2 != 0)
-		gridH--;
-
-	// Keep cell sizes as floats. Individual cell positions are computed by
-	// rounding (col * cellW) to the nearest pixel, which distributes any
-	// sub-pixel remainder evenly across cells instead of dumping it all
-	// into the margins. This ensures grid edges align with cell boundaries
-	// (round(0 * cellW) == 0 and round(gridCols * cellW) == gridW).
-	cellW = (float)gridW / config_.gridCols;
-	cellH = (float)gridH / config_.gridRows;
-
-	// Center the grid in the window (remainder is guaranteed even)
-	offsetX = (totalW - gridW) / 2;
-	offsetY = (totalH - gridH) / 2;
-}
-
-void MultiviewWindow::updateLayout()
-{
-	if (config_.gridRows <= 0 || config_.gridCols <= 0)
-		return;
-
-	int gridW, gridH, offsetX, offsetY;
-	float cellW, cellH;
-	calculateGridMetrics(gridW, gridH, offsetX, offsetY, cellW, cellH);
-
-	// Cache metrics for paintEvent
-	gridWidth_ = gridW;
-	gridHeight_ = gridH;
-	gridOffsetX_ = offsetX;
-	gridOffsetY_ = offsetY;
-	cellWidth_ = cellW;
-	cellHeight_ = cellH;
-
-	// Cell surfaces are native child windows that paint over the parent's
-	// grid lines. The inset shrinks each surface so the grid lines remain
-	// visible in the gaps between surfaces. For pen width W, floor(W/2)
-	// is the ideal inset, but width 1 yields 0 which leaves no gap at
-	// all — so enforce a minimum of 1 whenever a border is configured.
-	int border = config_.gridBorderWidth;
-	int inset = border > 0 ? qMax(1, border / 2) : 0;
-
-	for (int i = 0; i < config_.cells.size() && i < cellSurfaces_.size(); i++) {
-		const CellConfig &cell = config_.cells[i];
-		// Compute each cell's pixel boundaries by rounding individually.
-		// This distributes fractional remainders evenly across cells
-		// rather than accumulating them all into the margins.
-		int cellX = qRound(cell.col * cellW);
-		int cellNextX = qRound((cell.col + cell.colSpan) * cellW);
-		int cellY = qRound(cell.row * cellH);
-		int cellNextY = qRound((cell.row + cell.rowSpan) * cellH);
-
-		int x = offsetX + cellX + inset;
-		int y = offsetY + cellY + inset;
-		int w = (cellNextX - cellX) - 2 * inset;
-		int h = (cellNextY - cellY) - 2 * inset;
-		if (w < 1)
-			w = 1;
-		if (h < 1)
-			h = 1;
-
-		cellSurfaces_[i]->setGeometry(x, y, w, h);
-		if (i < renderers_.size() && renderers_[i])
-			renderers_[i]->resize(w, h);
-	}
-
-	// Trigger repaint for grid borders
-	update();
-}
-
-void MultiviewWindow::resizeEvent(QResizeEvent *event)
-{
-	QWidget::resizeEvent(event);
-	updateLayout();
-	saveWindowState();
+	MultiviewDisplay::showEvent(event);
+	setOpen(true);
 }
 
 void MultiviewWindow::moveEvent(QMoveEvent *event)
 {
-	QWidget::moveEvent(event);
+	MultiviewDisplay::moveEvent(event);
+	saveWindowState();
+}
+
+void MultiviewWindow::resizeEvent(QResizeEvent *event)
+{
+	MultiviewDisplay::resizeEvent(event);
 	saveWindowState();
 }
 
 void MultiviewWindow::closeEvent(QCloseEvent *event)
 {
-	updatingConfig_ = true;
-	config_.wasOpen = false;
-	GetConfigManager()->updateMultiview(config_);
-	updatingConfig_ = false;
-	QWidget::closeEvent(event);
+	if (!preserveOpenStateOnClose_)
+		setOpen(false);
+
+	// Drop out of the registry now rather than at deferred deletion, so the
+	// same multiview can be reopened straight away
+	if (openWindows_.value(id_) == this)
+		openWindows_.remove(id_);
+
+	MultiviewDisplay::closeEvent(event);
 }
 
 void MultiviewWindow::changeEvent(QEvent *event)
 {
-	QWidget::changeEvent(event);
+	MultiviewDisplay::changeEvent(event);
 	if (event->type() == QEvent::WindowStateChange) {
 		bool nowFullscreen = windowState() & Qt::WindowFullScreen;
 		if (nowFullscreen != fullscreen_) {
@@ -372,15 +262,19 @@ void MultiviewWindow::changeEvent(QEvent *event)
 	}
 }
 
+void MultiviewWindow::onPixelSizeChanged()
+{
+	if (renderer_)
+		renderer_->setPixelRatio((float)devicePixelRatioF());
+}
+
 void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 {
 	QMenu menu(this);
 
-	// Fullscreen options per monitor
 	QList<QScreen *> screens = QGuiApplication::screens();
-	for (int i = 0; i < screens.size(); i++) {
-		QScreen *screen = screens[i];
-		QString label = QString(LG_TEXT("ToolsMenu.FullscreenOn")).arg(screen->name());
+	for (int i = 0; i < (int)screens.size(); i++) {
+		QString label = QString(LG_TEXT("ToolsMenu.FullscreenOn")).arg(screens[i]->name());
 		menu.addAction(label, this, [this, i]() { setFullscreenOnMonitor(i); });
 	}
 
@@ -398,41 +292,22 @@ void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 	menu.exec(event->globalPos());
 }
 
-void MultiviewWindow::saveWindowState()
-{
-	if (!fullscreen_)
-		config_.geometry = geometry();
-	config_.fullscreen = fullscreen_;
-
-	// Find current monitor
-	QScreen *screen = QGuiApplication::screenAt(geometry().center());
-	if (screen) {
-		int idx = QGuiApplication::screens().indexOf(screen);
-		config_.monitorId = idx;
-	}
-
-	updatingConfig_ = true;
-	GetConfigManager()->updateMultiview(config_);
-	updatingConfig_ = false;
-}
-
 void MultiviewWindow::setFullscreenOnMonitor(int screenIndex)
 {
 	QList<QScreen *> screens = QGuiApplication::screens();
-	if (screenIndex < 0 || screenIndex >= screens.size())
+	if (screenIndex < 0 || screenIndex >= (int)screens.size())
 		return;
 
+	// Remember the windowed geometry to return to
 	if (!fullscreen_)
-		config_.geometry = geometry(); // Save windowed geometry before going fullscreen
+		saveWindowState();
 
-	QScreen *screen = screens[screenIndex];
-	setScreen(screen);
-	setGeometry(screen->geometry());
+	QScreen *target = screens[screenIndex];
+	setScreen(target);
+	setGeometry(target->geometry());
 	showFullScreen();
 
 	fullscreen_ = true;
-	config_.fullscreen = true;
-	config_.monitorId = screenIndex;
 	updateTitle();
 	saveWindowState();
 }
@@ -441,10 +316,10 @@ void MultiviewWindow::setWindowed()
 {
 	showNormal();
 	fullscreen_ = false;
-	config_.fullscreen = false;
 
-	if (config_.geometry.isValid())
-		setGeometry(config_.geometry);
+	QRect geometry = GetConfigManager()->windowState(id_).geometry;
+	if (geometry.isValid())
+		setGeometry(geometry);
 
 	updateTitle();
 	saveWindowState();
@@ -454,18 +329,7 @@ void MultiviewWindow::sendToMainDisplay()
 {
 	// Leave fullscreen first so the window can be repositioned
 	setWindowed();
-
-	// Center a 1280x720 window on the primary screen
-	QScreen *primaryScreen = QGuiApplication::primaryScreen();
-	if (primaryScreen) {
-		QRect screenGeom = primaryScreen->geometry();
-		int x = screenGeom.x() + (screenGeom.width() - 1280) / 2;
-		int y = screenGeom.y() + (screenGeom.height() - 720) / 2;
-		setGeometry(x, y, 1280, 720);
-	} else {
-		// Fallback if no primary screen found
-		resize(1280, 720);
-	}
+	setGeometry(CenteredOnPrimaryScreen(kDefaultWidth, kDefaultHeight));
 
 	raise();
 	activateWindow();
@@ -473,136 +337,15 @@ void MultiviewWindow::sendToMainDisplay()
 
 void MultiviewWindow::openEditDialog()
 {
-	MultiviewEditDialog dlg(config_, false, this);
-	if (dlg.exec() == QDialog::Accepted) {
-		reloadConfig();
-	}
+	// The window reloads through ConfigManager::multiviewUpdated
+	MultiviewEditDialog dlg(GetConfigManager()->getMultiview(id_), false, this);
+	dlg.exec();
 }
 
 void MultiviewWindow::updateTitle()
 {
-	QString title = name_;
+	QString title = GetConfigManager()->getMultiview(id_).name;
 	if (fullscreen_)
 		title += LG_TEXT("WindowMenu.FullscreenSuffix");
 	setWindowTitle(title);
-}
-
-void MultiviewWindow::paintEvent(QPaintEvent *event)
-{
-	QWidget::paintEvent(event);
-
-	if (config_.gridRows <= 0 || config_.gridCols <= 0)
-		return;
-
-	QPainter painter(this);
-	painter.setRenderHint(QPainter::Antialiasing, false);
-
-	// Fill background with black
-	painter.fillRect(rect(), Qt::black);
-
-	// Build ownership map: which cell index owns each grid position
-	// -1 means no cell owns it (shouldn't happen in valid config)
-	QVector<QVector<int>> ownership(config_.gridRows, QVector<int>(config_.gridCols, -1));
-	for (int i = 0; i < config_.cells.size(); i++) {
-		const CellConfig &cell = config_.cells[i];
-		for (int r = cell.row; r < cell.row + cell.rowSpan && r < config_.gridRows; r++) {
-			for (int c = cell.col; c < cell.col + cell.colSpan && c < config_.gridCols; c++) {
-				ownership[r][c] = i;
-			}
-		}
-	}
-
-	// Use fillRect instead of pen-based drawLine for grid lines.
-	// QPainter::drawLine with even pen widths shifts the extra pixel to
-	// one side, causing a 1-pixel asymmetry between the left and right
-	// (or top and bottom) gaps around each cell. fillRect specifies the
-	// exact pixel rectangle, eliminating the pen-centering ambiguity.
-	int border = config_.gridBorderWidth;
-	int inset = border > 0 ? qMax(1, border / 2) : 0;
-	int lineThick = 2 * inset; // line thickness in pixels
-	QColor lineColor = config_.gridLineColor;
-
-	// Draw vertical lines - only where there's a cell boundary
-	// A vertical line at column 'col' should be drawn between row positions
-	// only if the cells on either side are different
-	for (int col = 0; col <= config_.gridCols; col++) {
-		int colPixel = qRound(col * cellWidth_);
-		int lineX = gridOffsetX_ + colPixel - inset;
-
-		// For edge lines (col 0 and col == gridCols), always draw full line
-		if (col == 0 || col == config_.gridCols) {
-			painter.fillRect(lineX, gridOffsetY_ - inset, lineThick, gridHeight_ + 2 * inset, lineColor);
-			continue;
-		}
-
-		// For interior lines, only draw segments where cells differ
-		int segmentStart = -1;
-		for (int row = 0; row < config_.gridRows; row++) {
-			int leftCell = ownership[row][col - 1];
-			int rightCell = ownership[row][col];
-
-			bool needLine = (leftCell != rightCell);
-
-			if (needLine && segmentStart < 0) {
-				// Start a new segment
-				segmentStart = row;
-			} else if (!needLine && segmentStart >= 0) {
-				// End the segment
-				int startPixel = qRound(segmentStart * cellHeight_);
-				int endPixel = qRound(row * cellHeight_);
-				int y1 = gridOffsetY_ + startPixel - inset;
-				int segH = (endPixel - startPixel) + 2 * inset;
-				painter.fillRect(lineX, y1, lineThick, segH, lineColor);
-				segmentStart = -1;
-			}
-		}
-		// Close any open segment
-		if (segmentStart >= 0) {
-			int startPixel = qRound(segmentStart * cellHeight_);
-			int y1 = gridOffsetY_ + startPixel - inset;
-			int segH = (gridHeight_ - startPixel) + 2 * inset;
-			painter.fillRect(lineX, y1, lineThick, segH, lineColor);
-		}
-	}
-
-	// Draw horizontal lines - only where there's a cell boundary
-	for (int row = 0; row <= config_.gridRows; row++) {
-		int rowPixel = qRound(row * cellHeight_);
-		int lineY = gridOffsetY_ + rowPixel - inset;
-
-		// For edge lines (row 0 and row == gridRows), always draw full line
-		if (row == 0 || row == config_.gridRows) {
-			painter.fillRect(gridOffsetX_ - inset, lineY, gridWidth_ + 2 * inset, lineThick, lineColor);
-			continue;
-		}
-
-		// For interior lines, only draw segments where cells differ
-		int segmentStart = -1;
-		for (int col = 0; col < config_.gridCols; col++) {
-			int topCell = ownership[row - 1][col];
-			int bottomCell = ownership[row][col];
-
-			bool needLine = (topCell != bottomCell);
-
-			if (needLine && segmentStart < 0) {
-				// Start a new segment
-				segmentStart = col;
-			} else if (!needLine && segmentStart >= 0) {
-				// End the segment
-				int startPixel = qRound(segmentStart * cellWidth_);
-				int endPixel = qRound(col * cellWidth_);
-				int x1 = gridOffsetX_ + startPixel - inset;
-				int segW = (endPixel - startPixel) + 2 * inset;
-				painter.fillRect(x1, lineY, segW, lineThick, lineColor);
-				segmentStart = -1;
-			}
-		}
-		// Close any open segment
-		if (segmentStart >= 0) {
-			int startPixel = qRound(segmentStart * cellWidth_);
-			int x1 = gridOffsetX_ + startPixel - inset;
-			int segW = (gridWidth_ - startPixel) + 2 * inset;
-			painter.fillRect(x1, lineY, segW, lineThick, lineColor);
-		}
-	}
 }

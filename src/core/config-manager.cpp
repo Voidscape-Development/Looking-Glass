@@ -18,101 +18,283 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "config-manager.hpp"
 #include "../plugin.hpp"
-#include "../ui/multiview-window.hpp"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 
 #include <QDir>
 #include <QFile>
-#include <QFont>
+#include <QFileInfo>
+#include <QJsonDocument>
 #include <QRegularExpression>
+#include <QSaveFile>
+#include <QUuid>
 
-ConfigManager::ConfigManager(QObject *parent) : QObject(parent) {}
+#include <algorithm>
 
-ConfigManager::~ConfigManager() {}
+namespace {
 
-// --- Per-collection multiview CRUD ---
+// Key under which multiviews are stored in the scene collection's module data
+constexpr const char *kSaveKey = "looking-glass";
 
-QStringList ConfigManager::multiviewNames() const
+// Coalesces bursts of changes (a window being dragged, several edits in a
+// row) into a single scene collection save
+constexpr int kSaveDelayMs = 1000;
+
+QString NewId()
 {
-	return multiviews_.keys();
+	return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
-bool ConfigManager::hasMultiview(const QString &name) const
+QString ModuleConfigPath(const char *file)
 {
-	return multiviews_.contains(name);
+	char *path = obs_module_config_path(file);
+	QString result = path ? QString::fromUtf8(path) : QString();
+	bfree(path);
+	return result;
 }
 
-MultiviewConfig ConfigManager::getMultiview(const QString &name) const
+QJsonObject ReadJsonFile(const QString &path)
 {
-	return multiviews_.value(name);
+	QFile file(path);
+	if (path.isEmpty() || !file.open(QIODevice::ReadOnly))
+		return QJsonObject();
+
+	QJsonParseError error;
+	QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &error);
+	if (error.error != QJsonParseError::NoError) {
+		obs_log(LOG_WARNING, "could not parse %s: %s", path.toUtf8().constData(),
+			error.errorString().toUtf8().constData());
+		return QJsonObject();
+	}
+	return doc.object();
 }
 
-void ConfigManager::addMultiview(const MultiviewConfig &mv)
+bool WriteJsonFile(const QString &path, const QJsonObject &root)
 {
-	multiviews_[mv.name] = mv;
-	saveCurrentCollection();
-	emit multiviewAdded(mv.name);
+	if (path.isEmpty())
+		return false;
+
+	QDir().mkpath(QFileInfo(path).absolutePath());
+
+	// QSaveFile writes to a temporary file and renames it into place, so a
+	// crash mid-write never leaves a truncated file behind
+	QSaveFile file(path);
+	if (!file.open(QIODevice::WriteOnly)) {
+		obs_log(LOG_WARNING, "could not write %s", path.toUtf8().constData());
+		return false;
+	}
+	file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+	return file.commit();
 }
 
-void ConfigManager::updateMultiview(const MultiviewConfig &mv)
+QString BuiltInTemplateName()
 {
-	multiviews_[mv.name] = mv;
-	saveCurrentCollection();
-	emit multiviewUpdated(mv.name);
+	return QString::fromUtf8(LG_TEXT("DefaultTemplate.Name"));
 }
 
-void ConfigManager::removeMultiview(const QString &name)
+bool LessByName(const MultiviewConfig &a, const MultiviewConfig &b)
 {
-	if (multiviews_.remove(name)) {
-		saveCurrentCollection();
-		emit multiviewRemoved(name);
+	return QString::compare(a.name, b.name, Qt::CaseInsensitive) < 0;
+}
+
+} // namespace
+
+ConfigManager::ConfigManager(QObject *parent) : QObject(parent)
+{
+	saveTimer_.setSingleShot(true);
+	saveTimer_.setInterval(kSaveDelayMs);
+	connect(&saveTimer_, &QTimer::timeout, this, []() { obs_frontend_save(); });
+}
+
+ConfigManager::~ConfigManager()
+{
+	disconnectFromFrontend();
+}
+
+void ConfigManager::connectToFrontend()
+{
+	if (connected_)
+		return;
+
+	obs_frontend_add_save_callback(SaveCallback, this);
+	connected_ = true;
+	loadTemplates();
+}
+
+void ConfigManager::disconnectFromFrontend()
+{
+	if (!connected_)
+		return;
+
+	saveTimer_.stop();
+	obs_frontend_remove_save_callback(SaveCallback, this);
+	connected_ = false;
+}
+
+// --- Per-collection multiviews ---
+
+QVector<MultiviewConfig> ConfigManager::multiviews() const
+{
+	QVector<MultiviewConfig> list = multiviews_.values();
+	std::sort(list.begin(), list.end(), LessByName);
+	return list;
+}
+
+bool ConfigManager::hasMultiview(const QString &id) const
+{
+	return multiviews_.contains(id);
+}
+
+MultiviewConfig ConfigManager::getMultiview(const QString &id) const
+{
+	return multiviews_.value(id);
+}
+
+QString ConfigManager::findIdByName(const QString &name) const
+{
+	for (const MultiviewConfig &mv : multiviews_) {
+		if (mv.name == name)
+			return mv.id;
+	}
+	return QString();
+}
+
+bool ConfigManager::isNameTaken(const QString &name, const QString &exceptId) const
+{
+	QString id = findIdByName(name);
+	return !id.isEmpty() && id != exceptId;
+}
+
+QString ConfigManager::addMultiview(MultiviewConfig mv)
+{
+	mv.name = mv.name.trimmed();
+	if (mv.name.isEmpty() || isNameTaken(mv.name))
+		return QString();
+
+	mv.id = NewId();
+	multiviews_.insert(mv.id, mv);
+	requestSave();
+	emit multiviewAdded(mv.id);
+	return mv.id;
+}
+
+void ConfigManager::updateLayout(const MultiviewConfig &mv)
+{
+	auto it = multiviews_.find(mv.id);
+	if (it == multiviews_.end())
+		return;
+
+	QString name = mv.name.trimmed();
+	if (name.isEmpty() || isNameTaken(name, mv.id))
+		name = it->name;
+	bool renamed = name != it->name;
+
+	MultiviewConfig updated = mv;
+	updated.name = name;
+	updated.window = it->window;
+	*it = updated;
+
+	requestSave();
+	if (renamed)
+		emit multiviewRenamed(mv.id);
+	emit multiviewUpdated(mv.id);
+}
+
+void ConfigManager::removeMultiview(const QString &id)
+{
+	if (multiviews_.remove(id)) {
+		requestSave();
+		emit multiviewRemoved(id);
 	}
 }
 
-void ConfigManager::renameMultiview(const QString &oldName, const QString &newName)
+bool ConfigManager::renameMultiview(const QString &id, const QString &newName)
 {
-	if (!multiviews_.contains(oldName) || multiviews_.contains(newName))
-		return;
-	MultiviewConfig mv = multiviews_.take(oldName);
-	mv.name = newName;
-	multiviews_[newName] = mv;
-	saveCurrentCollection();
-	emit multiviewRenamed(oldName, newName);
+	auto it = multiviews_.find(id);
+	QString name = newName.trimmed();
+	if (it == multiviews_.end() || name.isEmpty() || isNameTaken(name, id))
+		return false;
+	if (it->name == name)
+		return true;
+
+	it->name = name;
+	requestSave();
+	emit multiviewRenamed(id);
+	return true;
 }
 
-void ConfigManager::duplicateMultiview(const QString &srcName, const QString &newName)
+QString ConfigManager::duplicateMultiview(const QString &id, const QString &newName)
 {
-	if (!multiviews_.contains(srcName) || multiviews_.contains(newName))
+	if (!multiviews_.contains(id))
+		return QString();
+
+	MultiviewConfig copy = multiviews_.value(id);
+	copy.name = newName;
+	copy.window.open = false;
+	return addMultiview(copy);
+}
+
+WindowState ConfigManager::windowState(const QString &id) const
+{
+	return multiviews_.value(id).window;
+}
+
+void ConfigManager::setWindowState(const QString &id, const WindowState &state)
+{
+	auto it = multiviews_.find(id);
+	if (it == multiviews_.end())
 		return;
-	MultiviewConfig mv = multiviews_[srcName];
-	mv.name = newName;
-	mv.wasOpen = false;
-	multiviews_[newName] = mv;
-	saveCurrentCollection();
-	emit multiviewAdded(newName);
+
+	WindowState &current = it->window;
+	if (current.geometry == state.geometry && current.screenName == state.screenName &&
+	    current.screenIndex == state.screenIndex && current.fullscreen == state.fullscreen &&
+	    current.open == state.open)
+		return;
+
+	current = state;
+	requestSave();
 }
 
 // --- Global layout templates ---
 
 QStringList ConfigManager::templateNames() const
 {
-	return templates_.keys();
+	QStringList names = templates_.keys();
+	names.prepend(BuiltInTemplateName());
+	return names;
 }
 
 bool ConfigManager::hasTemplate(const QString &name) const
 {
-	return templates_.contains(name);
+	return isBuiltInTemplate(name) || templates_.contains(name);
 }
 
 TemplateConfig ConfigManager::getTemplate(const QString &name) const
 {
+	if (isBuiltInTemplate(name))
+		return defaultTemplate();
 	return templates_.value(name);
 }
 
 void ConfigManager::addTemplate(const TemplateConfig &t)
 {
+	if (t.name.isEmpty() || isBuiltInTemplate(t.name))
+		return;
+
+	templates_[t.name] = t;
+	saveTemplates();
+	emit templatesChanged();
+}
+
+void ConfigManager::replaceTemplate(const QString &oldName, const TemplateConfig &t)
+{
+	if (t.name.isEmpty() || isBuiltInTemplate(oldName) || isBuiltInTemplate(t.name))
+		return;
+	if (t.name != oldName && templates_.contains(t.name))
+		return;
+
+	templates_.remove(oldName);
 	templates_[t.name] = t;
 	saveTemplates();
 	emit templatesChanged();
@@ -128,8 +310,9 @@ void ConfigManager::removeTemplate(const QString &name)
 
 void ConfigManager::renameTemplate(const QString &oldName, const QString &newName)
 {
-	if (!templates_.contains(oldName) || templates_.contains(newName))
+	if (!templates_.contains(oldName) || hasTemplate(newName))
 		return;
+
 	TemplateConfig t = templates_.take(oldName);
 	t.name = newName;
 	templates_[newName] = t;
@@ -137,71 +320,49 @@ void ConfigManager::renameTemplate(const QString &oldName, const QString &newNam
 	emit templatesChanged();
 }
 
+bool ConfigManager::isBuiltInTemplate(const QString &name) const
+{
+	return name == BuiltInTemplateName();
+}
+
 TemplateConfig ConfigManager::defaultTemplate() const
 {
 	TemplateConfig t;
-	t.name = LG_TEXT("DefaultTemplate.Name");
+	t.name = BuiltInTemplateName();
 	t.gridRows = 4;
 	t.gridCols = 4;
 
-	// Top-left 2x2: Preview
-	{
+	// Top half: 2x2 Preview on the left, 2x2 Program on the right
+	auto bigCell = [&](int col, WidgetType type, const char *labelKey) {
 		CellConfig cell;
 		cell.row = 0;
-		cell.col = 0;
+		cell.col = col;
 		cell.rowSpan = 2;
 		cell.colSpan = 2;
-		cell.widget.type = WidgetType::Preview;
-		cell.widget.labelText = LG_TEXT("DefaultTemplate.Preview");
-		cell.widget.labelVisible = true;
-		QFont font;
-		font.setPointSize(20);
-		cell.widget.labelFont = font.toString();
-		t.cells.append(cell);
-	}
+		cell.widget.type = type;
+		cell.widget.labelText = QString::fromUtf8(LG_TEXT(labelKey));
+		return cell;
+	};
+	t.cells.append(bigCell(0, WidgetType::Preview, "DefaultTemplate.Preview"));
+	t.cells.append(bigCell(2, WidgetType::Program, "DefaultTemplate.Program"));
 
-	// Top-Right 2x2: Program
-	{
-		CellConfig cell;
-		cell.row = 0;
-		cell.col = 2;
-		cell.rowSpan = 2;
-		cell.colSpan = 2;
-		cell.widget.type = WidgetType::Program;
-		cell.widget.labelText = LG_TEXT("DefaultTemplate.Program");
-		cell.widget.labelVisible = true;
-		QFont font;
-		font.setPointSize(20);
-		cell.widget.labelFont = font.toString();
-		t.cells.append(cell);
-	}
+	// Bottom two rows: the collection's scenes in order, then placeholders.
+	// Scene labels are left automatic so they follow scene renames.
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
 
-	// Gather available scene names for auto-fill
-	QStringList sceneNames;
-	struct obs_frontend_source_list sceneList = {};
-	obs_frontend_get_scenes(&sceneList);
-	for (size_t i = 0; i < sceneList.sources.num; i++) {
-		obs_source_t *src = sceneList.sources.array[i];
-		const char *name = obs_source_get_name(src);
-		if (name)
-			sceneNames.append(QString::fromUtf8(name));
-	}
-	obs_frontend_source_list_free(&sceneList);
-
-	// Bottom two rows: fill with scenes where available, otherwise placeholders
-	int sceneIdx = 0;
+	size_t sceneIdx = 0;
 	for (int r = 2; r <= 3; r++) {
 		for (int c = 0; c <= 3; c++) {
 			CellConfig cell;
 			cell.row = r;
 			cell.col = c;
-			cell.widget.labelVisible = true;
 
-			if (sceneIdx < sceneNames.size()) {
+			if (sceneIdx < scenes.sources.num) {
+				obs_source_t *scene = scenes.sources.array[sceneIdx++];
 				cell.widget.type = WidgetType::Scene;
-				cell.widget.sceneName = sceneNames[sceneIdx];
-				cell.widget.labelText = sceneNames[sceneIdx];
-				sceneIdx++;
+				cell.widget.sceneName = QString::fromUtf8(obs_source_get_name(scene));
+				cell.widget.sourceUuid = QString::fromUtf8(obs_source_get_uuid(scene));
 			} else {
 				cell.widget.type = WidgetType::Placeholder;
 			}
@@ -209,179 +370,203 @@ TemplateConfig ConfigManager::defaultTemplate() const
 		}
 	}
 
+	obs_frontend_source_list_free(&scenes);
 	return t;
-}
-
-// --- JSON persistence ---
-
-void ConfigManager::ensureConfigDir()
-{
-	char *path = obs_module_config_path("multiviews");
-	if (path) {
-		QDir().mkpath(QString::fromUtf8(path));
-		bfree(path);
-	}
-}
-
-QString ConfigManager::collectionConfigPath() const
-{
-	char *collection = obs_frontend_get_current_scene_collection();
-	QString collectionName = collection ? QString::fromUtf8(collection) : "default";
-	bfree(collection);
-	// Sanitize filename
-	collectionName.replace(QRegularExpression("[^a-zA-Z0-9_\\- ]"), "_");
-
-	char *dir = obs_module_config_path("multiviews");
-	QString result;
-	if (dir) {
-		result = QString::fromUtf8(dir) + "/" + collectionName + ".json";
-		bfree(dir);
-	}
-	return result;
 }
 
 QString ConfigManager::templatesConfigPath() const
 {
-	char *path = obs_module_config_path("templates.json");
-	QString result;
-	if (path) {
-		result = QString::fromUtf8(path);
-		bfree(path);
-	}
-	return result;
-}
-
-void ConfigManager::loadForCurrentCollection()
-{
-	multiviews_.clear();
-
-	QString path = collectionConfigPath();
-	if (path.isEmpty())
-		return;
-
-	obs_data_t *root = obs_data_create_from_json_file(path.toUtf8().constData());
-	if (!root)
-		return;
-
-	obs_data_array_t *arr = obs_data_get_array(root, "multiviews");
-	if (arr) {
-		size_t count = obs_data_array_count(arr);
-		for (size_t i = 0; i < count; i++) {
-			obs_data_t *item = obs_data_array_item(arr, i);
-			MultiviewConfig mv = MultiviewSerializer::MultiviewFromData(item);
-			if (!mv.name.isEmpty())
-				multiviews_[mv.name] = mv;
-			obs_data_release(item);
-		}
-		obs_data_array_release(arr);
-	}
-	obs_data_release(root);
-
-	emit multiviewsReloaded();
-}
-
-void ConfigManager::saveCurrentCollection()
-{
-	if (suppressSave_)
-		return;
-
-	ensureConfigDir();
-	QString path = collectionConfigPath();
-	if (path.isEmpty())
-		return;
-
-	obs_data_t *root = obs_data_create();
-	obs_data_array_t *arr = obs_data_array_create();
-
-	for (const auto &mv : multiviews_) {
-		obs_data_t *item = MultiviewSerializer::MultiviewToData(mv);
-		obs_data_array_push_back(arr, item);
-		obs_data_release(item);
-	}
-
-	obs_data_set_array(root, "multiviews", arr);
-	obs_data_array_release(arr);
-
-	obs_data_save_json(root, path.toUtf8().constData());
-	obs_data_release(root);
+	return ModuleConfigPath("templates.json");
 }
 
 void ConfigManager::loadTemplates()
 {
 	templates_.clear();
 
-	// Always ensure default template exists
-	TemplateConfig def = defaultTemplate();
-	templates_[def.name] = def;
-
-	QString path = templatesConfigPath();
-	if (path.isEmpty())
-		return;
-
-	obs_data_t *root = obs_data_create_from_json_file(path.toUtf8().constData());
-	if (!root)
-		return;
-
-	obs_data_array_t *arr = obs_data_get_array(root, "templates");
-	if (arr) {
-		size_t count = obs_data_array_count(arr);
-		for (size_t i = 0; i < count; i++) {
-			obs_data_t *item = obs_data_array_item(arr, i);
-			TemplateConfig t = MultiviewSerializer::TemplateFromData(item);
-			if (!t.name.isEmpty())
-				templates_[t.name] = t;
-			obs_data_release(item);
+	for (TemplateConfig t : MultiviewSerializer::TemplatesFromJson(ReadJsonFile(templatesConfigPath()))) {
+		// Older versions allowed a user template to shadow the built-in name
+		if (isBuiltInTemplate(t.name)) {
+			QString base = t.name;
+			for (int n = 2; hasTemplate(t.name); n++)
+				t.name = QStringLiteral("%1 (%2)").arg(base).arg(n);
 		}
-		obs_data_array_release(arr);
+		templates_[t.name] = t;
 	}
-	obs_data_release(root);
 
 	emit templatesChanged();
 }
 
-void ConfigManager::saveTemplates()
+void ConfigManager::saveTemplates() const
 {
-	ensureConfigDir();
-	QString path = templatesConfigPath();
-	if (path.isEmpty())
+	WriteJsonFile(templatesConfigPath(), MultiviewSerializer::TemplatesToJson(templates_.values()));
+}
+
+// --- Scene collection persistence ---
+
+void ConfigManager::SaveCallback(obs_data_t *saveData, bool saving, void *param)
+{
+	auto *self = static_cast<ConfigManager *>(param);
+	if (saving)
+		self->saveToCollection(saveData);
+	else
+		self->loadFromCollection(saveData);
+}
+
+void ConfigManager::saveToCollection(obs_data_t *saveData) const
+{
+	QJsonObject root = MultiviewSerializer::MultiviewsToJson(multiviews());
+	QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
+
+	obs_data_t *data = obs_data_create_from_json(json.constData());
+	if (!data) {
+		obs_log(LOG_WARNING, "could not serialize multiviews for the scene collection");
 		return;
+	}
+	obs_data_set_obj(saveData, kSaveKey, data);
+	obs_data_release(data);
+}
 
-	obs_data_t *root = obs_data_create();
-	obs_data_array_t *arr = obs_data_array_create();
-
-	for (const auto &t : templates_) {
-		// Don't persist the built-in default
-		if (t.name == defaultTemplate().name)
-			continue;
-		obs_data_t *item = MultiviewSerializer::TemplateToData(t);
-		obs_data_array_push_back(arr, item);
-		obs_data_release(item);
+void ConfigManager::loadFromCollection(obs_data_t *saveData)
+{
+	obs_data_t *data = obs_data_get_obj(saveData, kSaveKey);
+	if (!data) {
+		// Collection saved before multiviews lived inside it
+		QVector<MultiviewConfig> legacy = loadLegacyCollectionFile();
+		finishLoad(legacy);
+		if (!legacy.isEmpty())
+			requestSave();
+		return;
 	}
 
-	obs_data_set_array(root, "templates", arr);
-	obs_data_array_release(arr);
+	QByteArray json(obs_data_get_json(data));
+	obs_data_release(data);
 
-	obs_data_save_json(root, path.toUtf8().constData());
-	obs_data_release(root);
+	finishLoad(MultiviewSerializer::MultiviewsFromJson(QJsonDocument::fromJson(json).object()));
+}
+
+void ConfigManager::finishLoad(const QVector<MultiviewConfig> &multiviews)
+{
+	QVector<MultiviewConfig> list = multiviews;
+	resolveSourceUuids(list);
+
+	multiviews_.clear();
+	for (const MultiviewConfig &mv : list)
+		multiviews_.insert(mv.id, mv);
+
+	awaitingLoad_ = false;
+	emit multiviewsReloaded();
+}
+
+// Version 1 kept one JSON file per scene collection, named after a sanitized
+// form of the collection name. It is read once, when a collection without
+// embedded multiview data loads, and the result is saved into the collection.
+QVector<MultiviewConfig> ConfigManager::loadLegacyCollectionFile() const
+{
+	char *collection = obs_frontend_get_current_scene_collection();
+	QString collectionName = collection ? QString::fromUtf8(collection) : QStringLiteral("default");
+	bfree(collection);
+	collectionName.replace(QRegularExpression("[^a-zA-Z0-9_\\- ]"), "_");
+
+	QString dir = ModuleConfigPath("multiviews");
+	if (dir.isEmpty())
+		return {};
+
+	QString path = dir + "/" + collectionName + ".json";
+	if (!QFile::exists(path))
+		return {};
+
+	QVector<MultiviewConfig> list = MultiviewSerializer::MultiviewsFromJson(ReadJsonFile(path));
+	obs_log(LOG_INFO, "migrated %d multiview(s) from %s into the scene collection", (int)list.size(),
+		path.toUtf8().constData());
+	return list;
+}
+
+// Layouts written before UUIDs were tracked only know scenes and sources by
+// name. Look the UUIDs up once so later renames can be followed.
+void ConfigManager::resolveSourceUuids(QVector<MultiviewConfig> &multiviews) const
+{
+	for (MultiviewConfig &mv : multiviews) {
+		for (CellConfig &cell : mv.cells) {
+			WidgetConfig &w = cell.widget;
+			QString name = w.targetName();
+			if (name.isEmpty() || !w.sourceUuid.isEmpty())
+				continue;
+
+			obs_source_t *source = obs_get_source_by_name(name.toUtf8().constData());
+			if (source) {
+				w.sourceUuid = QString::fromUtf8(obs_source_get_uuid(source));
+				obs_source_release(source);
+			}
+		}
+	}
+}
+
+void ConfigManager::requestSave()
+{
+	if (connected_)
+		saveTimer_.start();
 }
 
 void ConfigManager::onSceneCollectionChanging()
 {
-	// Mark all currently open windows as wasOpen before saving, so they
-	// can be restored when this collection is loaded again later.
-	// Then save while the collection path still points to the old collection.
-	// Suppress further saves so that closeAll() doesn't write stale data
-	// to the new collection's file.
-	for (auto &mv : multiviews_) {
-		if (MultiviewWindow::findByName(mv.name))
-			mv.wasOpen = true;
-	}
-	saveCurrentCollection();
-	suppressSave_ = true;
+	// The outgoing collection is saved after this event, from the data still
+	// held here; the incoming one replaces it when it loads
+	awaitingLoad_ = true;
 }
 
 void ConfigManager::onSceneCollectionChanged()
 {
-	suppressSave_ = false;
-	loadForCurrentCollection();
+	// A brand-new or empty collection never calls the load callback
+	if (awaitingLoad_) {
+		QVector<MultiviewConfig> legacy = loadLegacyCollectionFile();
+		finishLoad(legacy);
+		if (!legacy.isEmpty())
+			requestSave();
+	}
+}
+
+void ConfigManager::onFinishedLoading()
+{
+	onSceneCollectionChanged();
+}
+
+void ConfigManager::onExit()
+{
+	// OBS has already saved the collection; anything after this point (such
+	// as windows closing) must not schedule another save
+	saveTimer_.stop();
+	disconnectFromFrontend();
+}
+
+// --- Source tracking ---
+
+void ConfigManager::onSourceRenamed(const QString &uuid, const QString &prevName, const QString &newName)
+{
+	for (MultiviewConfig &mv : multiviews_) {
+		bool changed = false;
+
+		for (CellConfig &cell : mv.cells) {
+			WidgetConfig &w = cell.widget;
+			if (w.type != WidgetType::Scene && w.type != WidgetType::Source)
+				continue;
+			if (w.sourceUuid != uuid && w.targetName() != prevName)
+				continue;
+
+			if (w.type == WidgetType::Scene)
+				w.sceneName = newName;
+			else
+				w.sourceName = newName;
+			w.sourceUuid = uuid;
+
+			// A label that just repeated the old name follows the new one
+			if (w.labelText == prevName)
+				w.labelText = newName;
+			changed = true;
+		}
+
+		if (changed) {
+			requestSave();
+			emit multiviewUpdated(mv.id);
+		}
+	}
 }

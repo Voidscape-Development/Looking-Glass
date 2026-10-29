@@ -92,53 +92,52 @@ void ToolsMenuManager::rebuildMenu()
 	QAction *manageTemplatesAction = submenu_->addAction(LG_TEXT("ToolsMenu.ManageTemplates"));
 	connect(manageTemplatesAction, &QAction::triggered, this, &ToolsMenuManager::onManageTemplates);
 
-	QStringList names = GetConfigManager()->multiviewNames();
-	if (!names.isEmpty()) {
+	const QVector<MultiviewConfig> multiviews = GetConfigManager()->multiviews();
+	if (!multiviews.isEmpty()) {
 		submenu_->addSeparator();
-		names.sort(Qt::CaseInsensitive);
 
 		QList<QScreen *> screens = QGuiApplication::screens();
 
-		for (const QString &name : names) {
-			QMenu *mvMenu = new QMenu(name, submenu_);
+		for (const MultiviewConfig &mv : multiviews) {
+			// Actions capture the id, which survives renames
+			const QString id = mv.id;
+			QMenu *mvMenu = new QMenu(mv.name, submenu_);
 			dynamicSubmenus_.append(mvMenu);
 
 			// Open action
 			QAction *openAction = mvMenu->addAction(LG_TEXT("ToolsMenu.Open"));
-			connect(openAction, &QAction::triggered, this, [this, name]() { onOpenMultiview(name); });
+			connect(openAction, &QAction::triggered, this, [this, id]() { onOpenMultiview(id); });
 
 			// Close action - only meaningful while a window is open, so its
 			// enabled state is refreshed each time the submenu is shown
 			QAction *closeAction = mvMenu->addAction(LG_TEXT("ToolsMenu.Close"));
-			connect(closeAction, &QAction::triggered, this, [this, name]() { onCloseMultiview(name); });
-			connect(mvMenu, &QMenu::aboutToShow, this, [closeAction, name]() {
-				closeAction->setEnabled(MultiviewWindow::findByName(name) != nullptr);
+			connect(closeAction, &QAction::triggered, this, [this, id]() { onCloseMultiview(id); });
+			connect(mvMenu, &QMenu::aboutToShow, this, [closeAction, id]() {
+				closeAction->setEnabled(MultiviewWindow::findById(id) != nullptr);
 			});
 
 			// Edit action
 			QAction *editAction = mvMenu->addAction(LG_TEXT("ToolsMenu.Edit"));
-			connect(editAction, &QAction::triggered, this, [this, name]() { onEditMultiview(name); });
+			connect(editAction, &QAction::triggered, this, [this, id]() { onEditMultiview(id); });
 
 			// Send to main display action
 			QAction *sendToMainAction = mvMenu->addAction(LG_TEXT("ToolsMenu.SendToMainDisplay"));
-			connect(sendToMainAction, &QAction::triggered, this,
-				[this, name]() { onSendToMainDisplay(name); });
+			connect(sendToMainAction, &QAction::triggered, this, [this, id]() { onSendToMainDisplay(id); });
 
 			mvMenu->addSeparator();
 
 			// Fullscreen options for each monitor
-			for (int i = 0; i < screens.size(); i++) {
-				QScreen *screen = screens[i];
-				QString label = QString(LG_TEXT("ToolsMenu.FullscreenOn")).arg(screen->name());
+			for (int i = 0; i < (int)screens.size(); i++) {
+				QString label = QString(LG_TEXT("ToolsMenu.FullscreenOn")).arg(screens[i]->name());
 				QAction *fsAction = mvMenu->addAction(label);
 				connect(fsAction, &QAction::triggered, this,
-					[this, name, i]() { onSetFullscreen(name, i); });
+					[this, id, i]() { onSetFullscreen(id, i); });
 			}
 
 			// Windowed option
 			mvMenu->addSeparator();
 			QAction *windowedAction = mvMenu->addAction(LG_TEXT("ToolsMenu.Windowed"));
-			connect(windowedAction, &QAction::triggered, this, [this, name]() { onSetWindowed(name); });
+			connect(windowedAction, &QAction::triggered, this, [this, id]() { onSetWindowed(id); });
 
 			submenu_->addMenu(mvMenu);
 		}
@@ -166,52 +165,44 @@ void ToolsMenuManager::onManageTemplates()
 	dlg.exec();
 }
 
-void ToolsMenuManager::onOpenMultiview(const QString &name)
+void ToolsMenuManager::onOpenMultiview(const QString &id)
 {
-	MultiviewWindow::openOrFocus(name);
+	MultiviewWindow::openOrFocus(id);
 }
 
-void ToolsMenuManager::onCloseMultiview(const QString &name)
+void ToolsMenuManager::onCloseMultiview(const QString &id)
 {
-	MultiviewWindow::closeByName(name);
+	MultiviewWindow::closeById(id);
 }
 
-void ToolsMenuManager::onEditMultiview(const QString &name)
+void ToolsMenuManager::onEditMultiview(const QString &id)
 {
+	// An open window reloads through ConfigManager::multiviewUpdated
 	QMainWindow *mainWindow = (QMainWindow *)obs_frontend_get_main_window();
-	MultiviewConfig config = GetConfigManager()->getMultiview(name);
-	MultiviewEditDialog dlg(config, false, mainWindow);
-	if (dlg.exec() == QDialog::Accepted) {
-		// Reload any open window for this multiview
-		MultiviewWindow *win = MultiviewWindow::findByName(name);
-		if (win)
-			win->reloadConfig();
-	}
+	MultiviewEditDialog dlg(GetConfigManager()->getMultiview(id), false, mainWindow);
+	dlg.exec();
 }
 
-void ToolsMenuManager::onSendToMainDisplay(const QString &name)
+void ToolsMenuManager::onSendToMainDisplay(const QString &id)
 {
 	// Open the window if not already open, then move it to the main display
-	MultiviewWindow::openOrFocus(name);
-	MultiviewWindow *win = MultiviewWindow::findByName(name);
-	if (win)
+	MultiviewWindow::openOrFocus(id);
+	if (MultiviewWindow *win = MultiviewWindow::findById(id))
 		win->sendToMainDisplay();
 }
 
-void ToolsMenuManager::onSetFullscreen(const QString &name, int screenIndex)
+void ToolsMenuManager::onSetFullscreen(const QString &id, int screenIndex)
 {
 	// Open the window if not already open, then set fullscreen
-	MultiviewWindow::openOrFocus(name);
-	MultiviewWindow *win = MultiviewWindow::findByName(name);
-	if (win)
+	MultiviewWindow::openOrFocus(id);
+	if (MultiviewWindow *win = MultiviewWindow::findById(id))
 		win->setFullscreenOnMonitor(screenIndex);
 }
 
-void ToolsMenuManager::onSetWindowed(const QString &name)
+void ToolsMenuManager::onSetWindowed(const QString &id)
 {
 	// Open the window if not already open, then set windowed
-	MultiviewWindow::openOrFocus(name);
-	MultiviewWindow *win = MultiviewWindow::findByName(name);
-	if (win)
+	MultiviewWindow::openOrFocus(id);
+	if (MultiviewWindow *win = MultiviewWindow::findById(id))
 		win->setWindowed();
 }

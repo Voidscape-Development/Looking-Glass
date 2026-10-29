@@ -42,6 +42,8 @@ private slots:
 	void onSelectionChanged();
 
 private:
+	QString selectedId() const;
+
 	QListWidget *listWidget_;
 	QPushButton *showBtn_;
 	QPushButton *editBtn_;

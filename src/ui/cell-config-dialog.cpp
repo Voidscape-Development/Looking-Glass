@@ -31,6 +31,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QFontDialog>
 #include <QFontDatabase>
 #include <QColorDialog>
+#include <QPair>
+#include <QSpinBox>
 
 #include <algorithm>
 
@@ -39,13 +41,10 @@ CellConfigDialog::CellConfigDialog(const WidgetConfig &current, QWidget *parent)
 	setWindowTitle(LG_TEXT("CellDialog.Title"));
 	setMinimumSize(600, 400);
 
-	// Initialize font from config or use default
-	if (!config_.labelFont.isEmpty()) {
+	// The font supplies the family and style; the label's size is set
+	// separately, relative to the cell
+	if (!config_.labelFont.isEmpty())
 		selectedFont_.fromString(config_.labelFont);
-	} else {
-		selectedFont_ = QFont();
-		selectedFont_.setPointSize(36);
-	}
 
 	selectedBgColor_ = config_.labelBgColor;
 
@@ -109,6 +108,14 @@ CellConfigDialog::CellConfigDialog(const WidgetConfig &current, QWidget *parent)
 	fontLayout->addWidget(fontPreviewLabel_, 1);
 	fontLayout->addWidget(fontBtn_);
 	labelLayout->addRow(LG_TEXT("CellDialog.Font"), fontLayout);
+
+	labelSizeSpin_ = new QSpinBox();
+	labelSizeSpin_->setRange(kLabelSizeMin, kLabelSizeMax);
+	labelSizeSpin_->setSingleStep(5);
+	labelSizeSpin_->setSuffix(QStringLiteral("%"));
+	labelSizeSpin_->setValue(config_.labelSize);
+	labelSizeSpin_->setToolTip(LG_TEXT("CellDialog.LabelSizeTooltip"));
+	labelLayout->addRow(LG_TEXT("CellDialog.LabelSize"), labelSizeSpin_);
 
 	// Background color selection with preview
 	auto *bgColorLayout = new QHBoxLayout();
@@ -191,8 +198,7 @@ void CellConfigDialog::updateTypeVisibility()
 	subtypeCombo_->setVisible(needsSelection);
 
 	// Status border only applies to types that can be in preview/program
-	bool canShowStatus =
-		(/*type == WidgetType::Preview || type == WidgetType::Program ||*/ type == WidgetType::Scene);
+	bool canShowStatus = type == WidgetType::Scene;
 	showStatusCheck_->setVisible(canShowStatus);
 }
 
@@ -220,11 +226,13 @@ void CellConfigDialog::updateFontPreview()
 {
 	QString style = QFontDatabase::styleString(selectedFont_);
 
-	QString description =
-		QString("%1 %2 %3pt").arg(selectedFont_.family()).arg(style).arg(selectedFont_.pointSize());
+	fontPreviewLabel_->setText(QString("%1 %2").arg(selectedFont_.family()).arg(style));
 
-	fontPreviewLabel_->setText(description);
-	fontPreviewLabel_->setFont(selectedFont_);
+	// Preview the face at the dialog's own text size; the size picked in the
+	// font dialog is not used, since labels are sized relative to their cell
+	QFont preview = selectedFont_;
+	preview.setPointSizeF(font().pointSizeF());
+	fontPreviewLabel_->setFont(preview);
 }
 
 void CellConfigDialog::updateBgColorPreview()
@@ -248,45 +256,39 @@ void CellConfigDialog::populateSubtypes()
 
 	WidgetType type = (WidgetType)typeCombo_->currentData().toInt();
 
-	if (type == WidgetType::Scene) {
-		// Enumerate scenes
-		struct obs_frontend_source_list scenes = {};
-		obs_frontend_get_scenes(&scenes);
-		QStringList names;
-		for (size_t i = 0; i < scenes.sources.num; i++) {
-			const char *name = obs_source_get_name(scenes.sources.array[i]);
-			if (name)
-				names.append(QString::fromUtf8(name));
-		}
-		obs_frontend_source_list_free(&scenes);
-		names.sort(Qt::CaseInsensitive);
-		for (const QString &n : names)
-			subtypeCombo_->addItem(n);
-		subtypeCombo_->setEnabled(true);
-
-		// Select current
-		int idx = subtypeCombo_->findText(config_.sceneName);
-		if (idx >= 0)
-			subtypeCombo_->setCurrentIndex(idx);
-
-	} else if (type == WidgetType::Source) {
-		// Enumerate all sources
-		QStringList names;
-		auto enumCb = [](void *param, obs_source_t *source) -> bool {
-			auto *list = (QStringList *)param;
+	if (type == WidgetType::Scene || type == WidgetType::Source) {
+		// Each entry carries the source's UUID so the cell keeps pointing at
+		// it through renames
+		QVector<QPair<QString, QString>> entries; // name, uuid
+		auto add = [](void *param, obs_source_t *source) -> bool {
+			auto *list = static_cast<QVector<QPair<QString, QString>> *>(param);
 			const char *name = obs_source_get_name(source);
-			uint32_t flags = obs_source_get_output_flags(source);
-			if (name && (flags & OBS_SOURCE_VIDEO))
-				list->append(QString::fromUtf8(name));
+			if (name && (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO))
+				list->append({QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source))});
 			return true;
 		};
-		obs_enum_sources(enumCb, &names);
-		names.sort(Qt::CaseInsensitive);
-		for (const QString &n : names)
-			subtypeCombo_->addItem(n);
+		if (type == WidgetType::Scene) {
+			struct obs_frontend_source_list scenes = {};
+			obs_frontend_get_scenes(&scenes);
+			for (size_t i = 0; i < scenes.sources.num; i++)
+				add(&entries, scenes.sources.array[i]);
+			obs_frontend_source_list_free(&scenes);
+		} else {
+			obs_enum_sources(add, &entries);
+		}
+
+		std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+			return QString::compare(a.first, b.first, Qt::CaseInsensitive) < 0;
+		});
+		for (const auto &entry : entries)
+			subtypeCombo_->addItem(entry.first, entry.second);
 		subtypeCombo_->setEnabled(true);
 
-		int idx = subtypeCombo_->findText(config_.sourceName);
+		// Select the current one, by UUID first and then by name
+		int idx = config_.sourceUuid.isEmpty() ? -1 : subtypeCombo_->findData(config_.sourceUuid);
+		if (idx < 0)
+			idx = subtypeCombo_->findText(type == WidgetType::Scene ? config_.sceneName
+										: config_.sourceName);
 		if (idx >= 0)
 			subtypeCombo_->setCurrentIndex(idx);
 
@@ -329,16 +331,20 @@ WidgetConfig CellConfigDialog::result() const
 	w.labelVAlign = (Qt::Alignment)labelVAlignCombo_->currentData().toInt();
 	w.labelText = labelTextEdit_->text();
 	w.labelFont = selectedFont_.toString();
+	w.labelSize = labelSizeSpin_->value();
 	w.labelBgColor = selectedBgColor_;
 	w.safeRegion = safeRegionCheck_->isChecked();
 	w.showStatus = showStatusCheck_->isChecked();
 
-	if (w.type == WidgetType::Scene)
+	if (w.type == WidgetType::Scene) {
 		w.sceneName = subtypeCombo_->currentText();
-	else if (w.type == WidgetType::Source)
+		w.sourceUuid = subtypeCombo_->currentData().toString();
+	} else if (w.type == WidgetType::Source) {
 		w.sourceName = subtypeCombo_->currentText();
-	else if (w.type == WidgetType::Canvas)
+		w.sourceUuid = subtypeCombo_->currentData().toString();
+	} else if (w.type == WidgetType::Canvas) {
 		w.canvasName = subtypeCombo_->currentData().toString();
+	}
 
 	return w;
 }

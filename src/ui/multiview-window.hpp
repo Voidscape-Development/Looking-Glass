@@ -18,86 +18,71 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
-#include <obs.h>
-
-#include <QWidget>
-#include <QVector>
 #include <QMap>
 #include <QString>
 
+#include <memory>
+
+#include "multiview-display.hpp"
 #include "../core/multiview-config.hpp"
-#include "../render/multiview-renderer.hpp"
+
+class MultiviewRenderer;
 
 /**
- * Top-level window that displays a multiview grid layout.
- * Manages cell surfaces and renderers. Labels and placeholder icons
- * are rendered by CellRenderer within the OBS graphics pipeline.
- * Supports windowed and per-monitor fullscreen modes with state persistence.
+ * Top-level window showing one multiview. The whole window is a single OBS
+ * display; MultiviewRenderer draws the grid, cell content, labels, and grid
+ * lines into it. Supports windowed and per-monitor fullscreen modes, and keeps
+ * its placement in the multiview's WindowState.
  */
-class MultiviewWindow : public QWidget {
+class MultiviewWindow : public MultiviewDisplay {
 	Q_OBJECT
 
 public:
-	explicit MultiviewWindow(const QString &name, QWidget *parent = nullptr);
-	~MultiviewWindow();
+	explicit MultiviewWindow(const QString &id);
+	~MultiviewWindow() override;
 
-	QString multiviewName() const { return name_; }
-	void setMultiviewName(const QString &name);
-	void reloadConfig();
+	QString multiviewId() const { return id_; }
 
 	// Window mode controls
 	void setFullscreenOnMonitor(int screenIndex);
 	void setWindowed();
 	void sendToMainDisplay();
 
-	// Static window management
-	static void openOrFocus(const QString &name);
-	static void closeByName(const QString &name);
-	static void closeAll();
-	static void reopenPreviouslyOpen();
-	static MultiviewWindow *findByName(const QString &name);
+	// Static window management. Windows are keyed by multiview id.
+	static void openOrFocus(const QString &id);
+	static void closeById(const QString &id);
+	static MultiviewWindow *findById(const QString &id);
 
-	// OBS source lifecycle hooks. Connect once at module load and disconnect
-	// at module unload; cells re-resolve the scenes and sources they display
-	// whenever the source list changes.
-	static void connectSourceSignals();
-	static void disconnectSourceSignals();
+	// Closes every window. With preserveOpenState, each multiview stays marked
+	// as open so it is restored the next time its scene collection loads.
+	static void closeAll(bool preserveOpenState);
+	static void reopenPreviouslyOpen();
+
+	// Re-resolves the scenes and sources shown by every open window
+	static void refreshSources();
 
 protected:
-	void resizeEvent(QResizeEvent *event) override;
+	void showEvent(QShowEvent *event) override;
 	void moveEvent(QMoveEvent *event) override;
+	void resizeEvent(QResizeEvent *event) override;
 	void closeEvent(QCloseEvent *event) override;
-	void contextMenuEvent(QContextMenuEvent *event) override;
 	void changeEvent(QEvent *event) override;
-	void paintEvent(QPaintEvent *event) override;
+	void contextMenuEvent(QContextMenuEvent *event) override;
+	void onPixelSizeChanged() override;
 
 private:
-	void buildGrid();
-	void initRenderers();
-	void updateLayout();
+	void reloadConfig();
+	void restoreWindowState(const WindowState &state);
 	void saveWindowState();
+	void setOpen(bool open);
 	void openEditDialog();
 	void updateTitle();
-	void calculateGridMetrics(int &gridW, int &gridH, int &offsetX, int &offsetY, float &cellW, float &cellH) const;
 
-	static void OnSourceListChanged(void *data, calldata_t *cd);
-	static void refreshSourceRefs();
-
-	QString name_;
-	MultiviewConfig config_;
-	QVector<QWidget *> cellSurfaces_;
-	QVector<CellRenderer *> renderers_;
-	QString placeholderSvgPath_;
+	QString id_;
+	std::unique_ptr<MultiviewRenderer> renderer_;
 	bool fullscreen_ = false;
-	bool updatingConfig_ = false;
-
-	// Cached grid metrics for painting
-	int gridOffsetX_ = 0;
-	int gridOffsetY_ = 0;
-	int gridWidth_ = 0;
-	int gridHeight_ = 0;
-	float cellWidth_ = 0;
-	float cellHeight_ = 0;
+	bool restoring_ = false;
 
 	static QMap<QString, MultiviewWindow *> openWindows_;
+	static bool preserveOpenStateOnClose_;
 };

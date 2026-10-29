@@ -23,79 +23,85 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs.h>
 #include <graphics/graphics.h>
 
-#include <QString>
-#include <QWidget>
+#include <QByteArray>
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+
+namespace LiveState {
+struct Sources;
+}
 
 /**
- * Renders a single multiview cell using an OBS display.
- * Each cell gets its own obs_display_t backed by a native window surface,
- * and renders the configured content (preview, program, canvas, scene, or source)
- * with aspect-ratio-preserving scaling. Labels and placeholder icons are rendered
- * as OBS graphics overlays composited on top of the cell content.
+ * Draws a whole multiview grid into a single obs_display_t.
+ *
+ * Threading model: the UI thread owns the configuration and builds an
+ * immutable Frame from it (resolved sources held visible, label text sources,
+ * the cell ownership map). The draw callback runs on the graphics thread and
+ * only reads the current Frame, under frameMutex_. Swapping in a new Frame
+ * takes the same mutex, so a Frame is never destroyed while it is being drawn;
+ * the old Frame is then released on the UI thread, outside the lock.
+ *
+ * The only Frame state the graphics thread writes is its own texture cache
+ * (label backgrounds, placeholder icons), which the UI thread never touches
+ * until the Frame is destroyed.
  */
-class CellRenderer {
+class MultiviewRenderer {
 public:
-	CellRenderer();
-	~CellRenderer();
+	MultiviewRenderer();
+	~MultiviewRenderer();
 
-	void init(QWidget *surface, const CellConfig &config);
-	void cleanup();
-	void updateConfig(const CellConfig &config);
-	void resize(uint32_t width, uint32_t height);
+	MultiviewRenderer(const MultiviewRenderer &) = delete;
+	MultiviewRenderer &operator=(const MultiviewRenderer &) = delete;
 
-	// Re-resolve the scene/source this cell displays. Must be called on the Qt
-	// thread whenever sources are created, renamed, or removed, so a cell that
-	// pointed at a missing source picks it up once it exists (and lets go of
-	// one that no longer matches).
-	void refreshShownSource();
+	// UI thread: show a new layout
+	void setConfig(const MultiviewConfig &config);
 
-	// Set the SVG file path for placeholder icon rendering
-	void setPlaceholderSvgPath(const QString &path);
+	// UI thread: re-resolve the scenes and sources the cells display, after
+	// sources were created, renamed, or removed. Rebuilds only if a cell now
+	// resolves to a different source.
+	void refreshSources();
+
+	// Any thread: device pixels per logical pixel of the target window, used
+	// to keep grid lines and labels the same visual size on HiDPI screens
+	void setPixelRatio(float ratio);
+
+	// obs_display draw callback; data is the MultiviewRenderer
+	static void Draw(void *data, uint32_t cx, uint32_t cy);
 
 private:
-	static void DrawCallback(void *data, uint32_t cx, uint32_t cy);
+	struct Cell;
+	struct Frame;
+	struct CellRect;
+
+	std::unique_ptr<Frame> buildFrame(const MultiviewConfig &config) const;
+	void swapFrame(std::unique_ptr<Frame> next);
+
+	// Graphics thread
 	void render(uint32_t cx, uint32_t cy);
-	void renderPreviewProgram(uint32_t cx, uint32_t cy, bool isProgram);
-	void renderCanvas(uint32_t cx, uint32_t cy);
-	void renderSource(obs_source_t *source, uint32_t cx, uint32_t cy);
-	void renderLabel(uint32_t cx, uint32_t cy);
-	void renderPlaceholderIcon(uint32_t cx, uint32_t cy);
-	void renderSafeAreas(int contentW, int contentH);
+	void drawGridLines(const Frame &frame, int offsetX, int offsetY, float cellW, float cellH, int inset);
+	void drawCell(Cell &cell, const CellRect &rect, const LiveState::Sources &live);
+	void drawContent(obs_source_t *source, const CellRect &rect, bool safeAreas);
+	void drawMainTexture(const CellRect &rect, bool safeAreas);
+	void drawCanvas(const Cell &cell, const CellRect &rect);
+	void drawLabel(Cell &cell, const CellRect &rect);
+	void drawPlaceholder(Cell &cell, const CellRect &rect);
+	void drawStatusBorder(const Cell &cell, obs_source_t *shown, const CellRect &rect,
+			      const LiveState::Sources &live);
+	void drawSafeAreas(uint32_t baseW, uint32_t baseH);
 	void initSafeAreaGeometry();
-	void renderStatusBorder(uint32_t cx, uint32_t cy);
-
-	void createLabelSource();
-	void destroyLabelSource();
-	void updateLabelSource();
-	QString resolveLabelText() const;
-
-	void createPlaceholderTexture();
-	void destroyPlaceholderTexture();
-	void destroyLabelBgTexture();
 	void destroySafeAreaGeometry();
 
-	QString targetSourceName() const;
-	void acquireShownSource();
-	void releaseShownSource();
+	MultiviewConfig config_; // UI thread only
+	QByteArray placeholderSvg_;
+	std::atomic<float> pixelRatio_{1.0f};
 
-	obs_display_t *display_ = nullptr;
-	obs_source_t *labelSource_ = nullptr;
+	std::mutex frameMutex_;
+	std::unique_ptr<Frame> frame_;
 
-	// Scene/source this cell displays. A weak reference is held so the source
-	// can still be destroyed while the cell points at it; the matching
-	// obs_source_inc_showing() reference is released in releaseShownSource().
-	obs_weak_source_t *shownSource_ = nullptr;
-	gs_texture_t *placeholderTexture_ = nullptr;
-	int placeholderTexSize_ = 0;
-	gs_texture_t *labelBgTexture_ = nullptr;
-	int labelBgTexW_ = 0;
-	int labelBgTexH_ = 0;
-	QColor labelBgTexColor_;
-	QString placeholderSvgPath_;
-	CellConfig config_;
-	QWidget *surface_ = nullptr;
-
-	// EBU R 95 safe area vertex buffers (normalized 0-1 coordinates)
+	// EBU R 95 safe area vertex buffers (normalized 0-1 coordinates), created
+	// lazily on the graphics thread
 	gs_vertbuffer_t *actionSafeVb_ = nullptr;
 	gs_vertbuffer_t *graphicsSafeVb_ = nullptr;
 	gs_vertbuffer_t *fourByThreeSafeVb_ = nullptr;
