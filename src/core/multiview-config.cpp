@@ -155,7 +155,7 @@ QVector<CellConfig> CellsFromJson(const QJsonValue &value)
 {
 	QVector<CellConfig> cells;
 	const QJsonArray array = value.toArray();
-	for (const QJsonValue &item : array)
+	for (const QJsonValue item : array)
 		cells.append(MultiviewSerializer::CellFromJson(item.toObject()));
 	return cells;
 }
@@ -348,7 +348,7 @@ QVector<MultiviewConfig> MultiviewsFromJson(const QJsonObject &root)
 	QSet<QString> names;
 
 	const QJsonArray array = root.value("multiviews").toArray();
-	for (const QJsonValue &item : array) {
+	for (const QJsonValue item : array) {
 		MultiviewConfig mv = MultiviewFromJson(item.toObject());
 		if (mv.name.isEmpty() || names.contains(mv.name))
 			continue;
@@ -380,7 +380,7 @@ QVector<TemplateConfig> TemplatesFromJson(const QJsonObject &root)
 	QSet<QString> names;
 
 	const QJsonArray array = root.value("templates").toArray();
-	for (const QJsonValue &item : array) {
+	for (const QJsonValue item : array) {
 		TemplateConfig t = TemplateFromJson(item.toObject());
 		if (t.name.isEmpty() || names.contains(t.name))
 			continue;
