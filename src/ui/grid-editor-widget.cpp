@@ -180,64 +180,6 @@ int GridEditorWidget::selectedCellIndex() const
 	return GridModel::SingleCellAt(rows_, cols_, cells_, selectedPositions_);
 }
 
-void GridEditorWidget::setWidgetForSelected(const WidgetConfig &widget)
-{
-	int idx = selectedCellIndex();
-	if (idx >= 0 && idx < (int)cells_.size()) {
-		cells_[idx].widget = widget;
-		update();
-		emit cellsChanged();
-	}
-}
-
-bool GridEditorWidget::canMergeSelected() const
-{
-	// Growing a selection over merged cells must not make a lone merged cell
-	// look mergeable; merging needs at least two distinct cells
-	return GridModel::CanMerge(rows_, cols_, cells_, selectedPositions_) &&
-	       GridModel::SelectedCellIndices(rows_, cols_, cells_, selectedPositions_).size() >= 2;
-}
-
-void GridEditorWidget::mergeSelected()
-{
-	if (!canMergeSelected())
-		return;
-	applyCells(GridModel::Merge(rows_, cols_, cells_, selectedPositions_));
-}
-
-bool GridEditorWidget::canResetSelected() const
-{
-	return GridModel::CanReset(rows_, cols_, cells_, selectedPositions_);
-}
-
-void GridEditorWidget::resetSelected()
-{
-	if (!canResetSelected())
-		return;
-
-	// Clearing a single 1x1 cell keeps it selected for further edits
-	int single = selectedCellIndex();
-	bool keepSelection = single >= 0 && cells_[single].rowSpan == 1 && cells_[single].colSpan == 1;
-
-	QSet<QPoint> selection = selectedPositions_;
-	applyCells(GridModel::Reset(rows_, cols_, cells_, selectedPositions_));
-	if (keepSelection) {
-		selectedPositions_ = selection;
-		update();
-		emit selectionChanged();
-	}
-}
-
-void GridEditorWidget::applyCells(const QVector<CellConfig> &cells)
-{
-	cells_ = cells;
-	selectedPositions_.clear();
-	rebuildOwnership();
-	update();
-	emit selectionChanged();
-	emit cellsChanged();
-}
-
 void GridEditorWidget::clearSelection()
 {
 	selectedPositions_.clear();

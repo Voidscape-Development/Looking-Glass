@@ -54,11 +54,6 @@ public:
 	QSet<QPoint> selectedPositions() const { return selectedPositions_; }
 	int selectedCellIndex() const;
 
-	void setWidgetForSelected(const WidgetConfig &widget);
-	bool canMergeSelected() const;
-	void mergeSelected();
-	bool canResetSelected() const;
-	void resetSelected();
 	void clearSelection();
 
 	// Grid line style and output shape, as configured on the multiview
@@ -98,7 +93,6 @@ private:
 	int ownerAt(int row, int col) const;
 	int cellIndexAtPixel(const QPoint &pixel) const;
 	void rebuildOwnership();
-	void applyCells(const QVector<CellConfig> &cells);
 	void setSelection(const QSet<QPoint> &selection);
 	QSet<QPoint> positionsInRect(int minC, int minR, int maxC, int maxR) const;
 	QSet<QPoint> cellPositions(int cellIndex) const;

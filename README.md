@@ -135,12 +135,18 @@ Creating one from **Manage Multiviews ▸ Create Template** offers a **Preserve 
 and scene names** checkbox:
 
 * **Checked** — the template keeps the exact widget types and source/scene names from the multiview. Best for reproducing a layout inside one collection.
-* **Unchecked** — content cells become placeholders. Best for a structural layout you will reuse against different scenes.
+* **Unchecked** — content cells become placeholders labeled with what they showed; fill them in after applying the template. Best for a structural layout you will reuse against different scenes.
 
 Apply a template from the **Template** dropdown in the multiview editor. Applying replaces
 the current grid, so you are asked to confirm first.
 
 **Tools ▸ Looking Glass ▸ Manage Templates…** renames, edits, and deletes your templates.
+**Edit** opens the same editor used for multiviews (content library, canvas, inspector,
+undo), without the grid line style, which templates do not store. The name is checked as
+you type: it must not be empty or match another template (or the built-in one), and
+**Save Template** stays disabled until it is valid, so a clash never discards your edits.
+Preserve exact source and scene names is chosen when the template is created, not in the editor. Closing with unsaved changes (including a rename) asks before
+discarding them.
 The built-in **Default (OBS-style)** template is always present and cannot be modified —
 it is generated each time it is used, so its auto-filled scene cells always match the
 current collection.

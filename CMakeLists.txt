@@ -46,7 +46,7 @@ target_sources(
     src/ui/tools-menu.cpp
     src/ui/grid-editor-widget.cpp
     src/ui/content-library-widget.cpp
-    src/ui/cell-config-dialog.cpp
+    src/ui/template-edit-dialog.cpp
     src/ui/cell-inspector.cpp
     src/ui/layout-editor-widget.cpp
     src/ui/multiview-edit-dialog.cpp

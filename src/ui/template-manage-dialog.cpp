@@ -17,23 +17,16 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "template-manage-dialog.hpp"
-#include "grid-editor-widget.hpp"
-#include "cell-config-dialog.hpp"
+#include "template-edit-dialog.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
-#include "../core/grid-model.hpp"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QInputDialog>
 #include <QMessageBox>
-#include <QLabel>
 #include <QLineEdit>
-#include <QDialogButtonBox>
-#include <QFormLayout>
-#include <QSpinBox>
-#include <QCheckBox>
 
 ManageTemplatesDialog::ManageTemplatesDialog(QWidget *parent) : QDialog(parent)
 {
@@ -145,157 +138,9 @@ void ManageTemplatesDialog::onEdit()
 	}
 	TemplateConfig tmpl = GetConfigManager()->getTemplate(templateName);
 
-	// Build an edit dialog with grid editor, size controls, and template properties
-	QDialog dlg(this);
-	dlg.setWindowTitle(QString(LG_TEXT("ManageTemplatesDialog.EditTitle")).arg(templateName));
-	dlg.setMinimumSize(800, 550);
-
-	auto *mainLayout = new QVBoxLayout(&dlg);
-
-	// Name field
-	auto *nameLayout = new QHBoxLayout();
-	nameLayout->addWidget(new QLabel(LG_TEXT("ManageTemplatesDialog.NameLabel")));
-	auto *nameEdit = new QLineEdit(templateName);
-	nameLayout->addWidget(nameEdit);
-	mainLayout->addLayout(nameLayout);
-
-	// Two-pane layout
-	auto *paneLayout = new QHBoxLayout();
-
-	// Left pane: grid editor
-	auto *gridEditor = new GridEditorWidget();
-	paneLayout->addWidget(gridEditor, 3);
-
-	// Right pane: controls
-	auto *rightLayout = new QVBoxLayout();
-
-	auto *gridSettingsForm = new QFormLayout();
-	auto *rowsSpin = new QSpinBox();
-	rowsSpin->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
-	rowsSpin->setValue(tmpl.gridRows);
-	gridSettingsForm->addRow(LG_TEXT("EditDialog.Rows"), rowsSpin);
-
-	auto *colsSpin = new QSpinBox();
-	colsSpin->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
-	colsSpin->setValue(tmpl.gridCols);
-	gridSettingsForm->addRow(LG_TEXT("EditDialog.Columns"), colsSpin);
-
-	rightLayout->addLayout(gridSettingsForm);
-	rightLayout->addSpacing(10);
-
-	// Preserve sources checkbox
-	auto *preserveCheck = new QCheckBox(LG_TEXT("ManageDialog.PreserveSources"));
-	preserveCheck->setToolTip(LG_TEXT("ManageDialog.PreserveSourcesTooltip"));
-	preserveCheck->setChecked(tmpl.preserveSources);
-	rightLayout->addWidget(preserveCheck);
-	rightLayout->addSpacing(10);
-
-	// Widget action buttons
-	auto *setWidgetBtn = new QPushButton(LG_TEXT("EditDialog.SetWidget"));
-	auto *editWidgetBtn = new QPushButton(LG_TEXT("EditDialog.EditWidget"));
-	auto *mergeBtn = new QPushButton(LG_TEXT("EditDialog.MergeWidgets"));
-	auto *resetBtn = new QPushButton(LG_TEXT("EditDialog.ResetWidgets"));
-
-	rightLayout->addWidget(setWidgetBtn);
-	rightLayout->addWidget(editWidgetBtn);
-	rightLayout->addSpacing(10);
-	rightLayout->addWidget(mergeBtn);
-	rightLayout->addWidget(resetBtn);
-	rightLayout->addStretch();
-
-	paneLayout->addLayout(rightLayout, 1);
-	mainLayout->addLayout(paneLayout, 1);
-
-	// Dialog buttons
-	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-	mainLayout->addWidget(buttons);
-
-	// Load existing grid
-	gridEditor->setGrid(tmpl.gridRows, tmpl.gridCols, tmpl.cells);
-
-	// Update button states based on selection
-	auto updateButtons = [&]() {
-		int cellIdx = gridEditor->selectedCellIndex();
-		bool hasSingleCell = cellIdx >= 0;
-		setWidgetBtn->setEnabled(hasSingleCell);
-		editWidgetBtn->setEnabled(hasSingleCell && cellIdx < gridEditor->cells().size() &&
-					  gridEditor->cells()[cellIdx].widget.type != WidgetType::None);
-		mergeBtn->setEnabled(gridEditor->canMergeSelected());
-		resetBtn->setEnabled(gridEditor->canResetSelected());
-	};
-
-	QObject::connect(gridEditor, &GridEditorWidget::selectionChanged, &dlg, updateButtons);
-
-	// Set/Edit widget
-	auto onSetWidget = [&]() {
-		int idx = gridEditor->selectedCellIndex();
-		WidgetConfig current;
-		if (idx >= 0)
-			current = gridEditor->cells()[idx].widget;
-		CellConfigDialog cellDlg(current, &dlg);
-		if (cellDlg.exec() == QDialog::Accepted)
-			gridEditor->setWidgetForSelected(cellDlg.result());
-	};
-
-	QObject::connect(setWidgetBtn, &QPushButton::clicked, &dlg, onSetWidget);
-	QObject::connect(editWidgetBtn, &QPushButton::clicked, &dlg, onSetWidget);
-
-	QObject::connect(mergeBtn, &QPushButton::clicked, &dlg, [&]() {
-		if (!gridEditor->canMergeSelected()) {
-			QMessageBox::warning(&dlg, LG_TEXT("EditDialog.CannotMerge"),
-					     LG_TEXT("EditDialog.CannotMergeMsg"));
-			return;
-		}
-		gridEditor->mergeSelected();
-	});
-
-	QObject::connect(resetBtn, &QPushButton::clicked, &dlg, [&]() { gridEditor->resetSelected(); });
-
-	// Grid size changes
-	auto onGridSizeChanged = [&]() {
-		int newRows = rowsSpin->value();
-		int newCols = colsSpin->value();
-		int oldRows = gridEditor->gridRows();
-		int oldCols = gridEditor->gridCols();
-		if (newRows == oldRows && newCols == oldCols)
-			return;
-
-		QVector<CellConfig> newCells = GridModel::Resize(gridEditor->cells(), newRows, newCols);
-		gridEditor->setGrid(newRows, newCols, newCells);
-	};
-
-	QObject::connect(rowsSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dlg, onGridSizeChanged);
-	QObject::connect(colsSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dlg, onGridSizeChanged);
-
-	QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-	QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-	updateButtons();
-
-	if (dlg.exec() != QDialog::Accepted)
-		return;
-
-	QString newName = nameEdit->text().trimmed();
-	if (newName.isEmpty())
-		return;
-
-	// Build updated template
-	TemplateConfig updated;
-	updated.name = newName;
-	updated.gridRows = gridEditor->gridRows();
-	updated.gridCols = gridEditor->gridCols();
-	updated.cells = gridEditor->cells();
-	updated.preserveSources = preserveCheck->isChecked();
-
-	ConfigManager *cm = GetConfigManager();
-
-	// Check for name conflicts (if name was changed)
-	if (newName != templateName && cm->hasTemplate(newName)) {
-		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("ManageTemplatesDialog.TemplateExists"));
-		return;
-	}
-
-	cm->replaceTemplate(templateName, updated);
+	TemplateEditDialog dlg(tmpl, this);
+	if (dlg.exec() == QDialog::Accepted)
+		GetConfigManager()->replaceTemplate(templateName, dlg.result());
 }
 
 void ManageTemplatesDialog::onDelete()
