@@ -48,6 +48,9 @@ public:
 	void setWindowed();
 	void sendToMainDisplay();
 
+	// Resizes the window to the grid's aspect ratio, removing letterbox bars
+	void fitToContent();
+
 	// Static window management. Windows are keyed by multiview id.
 	static void openOrFocus(const QString &id);
 	static void closeById(const QString &id);
