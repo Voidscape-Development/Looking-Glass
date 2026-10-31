@@ -20,8 +20,13 @@ enable_testing()
 
 set(_lg_src "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
-add_library(looking-glass-core STATIC "${_lg_src}/core/multiview-config.cpp" "${_lg_src}/core/grid-model.cpp"
-            "${_lg_src}/core/content-ref.cpp")
+add_library(
+  looking-glass-core
+  STATIC
+  "${_lg_src}/core/multiview-config.cpp"
+  "${_lg_src}/core/grid-model.cpp"
+  "${_lg_src}/core/content-ref.cpp"
+)
 target_include_directories(looking-glass-core PUBLIC "${_lg_src}/core")
 target_link_libraries(looking-glass-core PUBLIC Qt6::Core Qt6::Gui)
 
