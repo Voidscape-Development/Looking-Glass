@@ -31,6 +31,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QScreen>
 #include <QShowEvent>
 
+#include <algorithm>
+#include <cmath>
+
 QMap<QString, MultiviewWindow *> MultiviewWindow::openWindows_;
 bool MultiviewWindow::preserveOpenStateOnClose_ = false;
 
@@ -283,6 +286,11 @@ void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 		menu.addAction(LG_TEXT("ToolsMenu.Windowed"), this, &MultiviewWindow::setWindowed);
 	}
 
+	if (!fullscreen_) {
+		menu.addSeparator();
+		menu.addAction(LG_TEXT("WindowMenu.FitToContent"), this, &MultiviewWindow::fitToContent);
+	}
+
 	menu.addSeparator();
 	menu.addAction(LG_TEXT("WindowMenu.EditMultiview"), this, &MultiviewWindow::openEditDialog);
 
@@ -323,6 +331,40 @@ void MultiviewWindow::setWindowed()
 
 	updateTitle();
 	saveWindowState();
+}
+
+void MultiviewWindow::fitToContent()
+{
+	if (fullscreen_ || isMaximized())
+		return;
+
+	const MultiviewConfig config = GetConfigManager()->getMultiview(id_);
+	const int rows = std::max(1, config.gridRows);
+	const int cols = std::max(1, config.gridCols);
+
+	// Mirror the renderer: grid lines bleed half their width outside the grid,
+	// and every cell is 16:9
+	const int border = std::max(1, config.gridBorderWidth);
+	const int margin = 2 * ((border + 1) / 2);
+	const double gridAspect = (double)(cols * 16) / (double)(rows * 9);
+
+	// Keep the width and trim or grow the height to match the grid
+	const int availableW = std::max(1, width() - margin);
+	const int newHeight = (int)std::lround(availableW / gridAspect) + margin;
+
+	QRect geometry = this->geometry();
+	geometry.setHeight(std::max(newHeight, minimumHeight()));
+
+	// Keep the window on screen
+	if (QScreen *current = screen()) {
+		const QRect area = current->availableGeometry();
+		if (geometry.bottom() > area.bottom())
+			geometry.moveBottom(area.bottom());
+		if (geometry.top() < area.top())
+			geometry.moveTop(area.top());
+	}
+
+	setGeometry(geometry);
 }
 
 void MultiviewWindow::sendToMainDisplay()
