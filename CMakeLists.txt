@@ -47,6 +47,7 @@ target_sources(
     src/ui/grid-editor-widget.cpp
     src/ui/content-library-widget.cpp
     src/ui/cell-config-dialog.cpp
+    src/ui/cell-inspector.cpp
     src/ui/multiview-edit-dialog.cpp
     src/ui/multiview-manage-dialog.cpp
     src/ui/template-manage-dialog.cpp
