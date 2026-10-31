@@ -20,7 +20,13 @@ enable_testing()
 
 set(_lg_src "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
-add_library(looking-glass-core STATIC "${_lg_src}/core/multiview-config.cpp" "${_lg_src}/core/grid-model.cpp")
+add_library(
+  looking-glass-core
+  STATIC
+  "${_lg_src}/core/multiview-config.cpp"
+  "${_lg_src}/core/grid-model.cpp"
+  "${_lg_src}/core/content-ref.cpp"
+)
 target_include_directories(looking-glass-core PUBLIC "${_lg_src}/core")
 target_link_libraries(looking-glass-core PUBLIC Qt6::Core Qt6::Gui)
 
@@ -30,7 +36,7 @@ elseif(MSVC)
   target_compile_options(looking-glass-core PUBLIC /W3 /WX)
 endif()
 
-foreach(_test IN ITEMS test-grid-model test-serializer)
+foreach(_test IN ITEMS test-grid-model test-serializer test-content-ref)
   add_executable(${_test} ${_test}.cpp)
   target_link_libraries(${_test} PRIVATE looking-glass-core Qt6::Test)
   add_test(NAME ${_test} COMMAND ${_test})

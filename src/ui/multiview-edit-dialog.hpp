@@ -19,19 +19,20 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include <QDialog>
-#include <QComboBox>
-#include <QLineEdit>
-#include <QSpinBox>
-#include <QPushButton>
+#include <QString>
 
 #include "../core/multiview-config.hpp"
 
-class GridEditorWidget;
+class QLabel;
+class QLineEdit;
+class QMenu;
+class QPushButton;
+class LayoutEditorWidget;
 
 /**
- * Dialog for creating or editing a multiview layout.
- * Provides a visual grid editor, grid size controls, template selection,
- * and cell merge/reset/configure operations.
+ * Window for creating or editing a multiview layout: a name, a template menu
+ * and the full layout editor (content library, canvas and inspector). Every
+ * change is undoable; closing with unsaved changes asks first.
  */
 class MultiviewEditDialog : public QDialog {
 	Q_OBJECT
@@ -40,32 +41,27 @@ public:
 	explicit MultiviewEditDialog(const MultiviewConfig &config, bool isNew, QWidget *parent = nullptr);
 	MultiviewConfig result() const;
 
+public slots:
+	void reject() override;
+
 private slots:
-	void onSetWidget();
-	void onEditWidget();
-	void onMergeWidgets();
-	void onResetWidgets();
-	void onTemplateChanged(int index);
-	void onSelectionChanged();
 	void onConfirm();
 
 private:
-	void loadTemplate(const TemplateConfig &tmpl);
-	void onGridSizeChanged();
+	void populateTemplateMenu();
+	void applyTemplate(const QString &name);
+	void onNameChanged();
+	void updateInfo();
+	bool hasUnsavedChanges() const;
 
-	GridEditorWidget *gridEditor_;
-	QLineEdit *nameEdit_;
-	QSpinBox *rowsSpin_;
-	QSpinBox *colsSpin_;
-	QComboBox *templateCombo_;
-	QPushButton *setWidgetBtn_;
-	QPushButton *editWidgetBtn_;
-	QPushButton *mergeBtn_;
-	QPushButton *resetBtn_;
-	QSpinBox *borderWidthSpin_;
-	QPushButton *lineColorBtn_;
-	QColor gridLineColor_;
+	LayoutEditorWidget *layoutEditor_ = nullptr;
+	QLineEdit *nameEdit_ = nullptr;
+	QLabel *errorLabel_ = nullptr;
+	QMenu *templateMenu_ = nullptr;
+	QLabel *infoLabel_ = nullptr;
+	QPushButton *primaryButton_ = nullptr;
 
 	MultiviewConfig config_;
 	bool isNew_;
+	bool skipDiscardPrompt_ = false;
 };

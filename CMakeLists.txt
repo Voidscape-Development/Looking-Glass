@@ -41,10 +41,14 @@ target_sources(
     src/api/websocket-api.cpp
     src/core/multiview-config.cpp
     src/core/grid-model.cpp
+    src/core/content-ref.cpp
     src/core/config-manager.cpp
     src/ui/tools-menu.cpp
     src/ui/grid-editor-widget.cpp
-    src/ui/cell-config-dialog.cpp
+    src/ui/content-library-widget.cpp
+    src/ui/template-edit-dialog.cpp
+    src/ui/cell-inspector.cpp
+    src/ui/layout-editor-widget.cpp
     src/ui/multiview-edit-dialog.cpp
     src/ui/multiview-manage-dialog.cpp
     src/ui/template-manage-dialog.cpp

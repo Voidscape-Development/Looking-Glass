@@ -17,23 +17,54 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "multiview-edit-dialog.hpp"
-#include "grid-editor-widget.hpp"
-#include "cell-config-dialog.hpp"
+#include "layout-editor-widget.hpp"
 #include "multiview-window.hpp"
+#include "widget-type-style.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
 #include "../core/grid-model.hpp"
 
+#include <QAction>
 #include <QHBoxLayout>
-#include <QVBoxLayout>
+#include <QIcon>
 #include <QLabel>
-#include <QPushButton>
+#include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
-#include <QFormLayout>
-#include <QGroupBox>
-#include <QDialogButtonBox>
-#include <QSpinBox>
-#include <QColorDialog>
+#include <QPainter>
+#include <QPixmap>
+#include <QPushButton>
+#include <QToolButton>
+#include <QVBoxLayout>
+
+namespace {
+
+// Small picture of a template's grid, filled with the widget type colors
+QIcon TemplateThumbnail(const TemplateConfig &tmpl)
+{
+	const QSize size(64, 36);
+	const qreal ratio = 2.0;
+	QPixmap pixmap(size * ratio);
+	pixmap.setDevicePixelRatio(ratio);
+	pixmap.fill(QColor(0x1c, 0x1d, 0x22));
+
+	QPainter painter(&pixmap);
+	int rows = qMax(1, tmpl.gridRows);
+	int cols = qMax(1, tmpl.gridCols);
+	for (const CellConfig &cell : tmpl.cells) {
+		int x0 = qRound((double)cell.col * size.width() / cols);
+		int x1 = qRound((double)(cell.col + cell.colSpan) * size.width() / cols);
+		int y0 = qRound((double)cell.row * size.height() / rows);
+		int y1 = qRound((double)(cell.row + cell.rowSpan) * size.height() / rows);
+		QColor fill = cell.widget.type == WidgetType::None ? QColor(0x3a, 0x3c, 0x46)
+								   : WidgetTypeColor(cell.widget.type);
+		painter.fillRect(QRect(x0, y0, x1 - x0, y1 - y0).adjusted(1, 1, 0, 0), fill);
+	}
+	painter.end();
+	return QIcon(pixmap);
+}
+
+} // namespace
 
 MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isNew, QWidget *parent)
 	: QDialog(parent),
@@ -42,6 +73,9 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 {
 	setWindowTitle(isNew ? LG_TEXT("EditDialog.CreateTitle")
 			     : QString(LG_TEXT("EditDialog.EditTitle")).arg(config.name));
+	setSizeGripEnabled(true);
+	setMinimumSize(900, 560);
+	resize(1180, 720);
 
 	// New multiviews start from the built-in default template
 	if (config_.cells.isEmpty()) {
@@ -50,195 +84,182 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 		config_.gridCols = def.gridCols;
 		config_.cells = def.cells;
 	}
-	setMinimumSize(800, 550);
 
 	auto *mainLayout = new QVBoxLayout(this);
 
-	// Name field
-	auto *nameLayout = new QHBoxLayout();
-	nameLayout->addWidget(new QLabel(LG_TEXT("EditDialog.Name")));
+	// Header: name and template menu
+	auto *header = new QHBoxLayout();
+	auto *nameColumn = new QVBoxLayout();
+	nameColumn->setSpacing(2);
+	auto *caption = new QLabel(LG_TEXT("EditDialog.Name"));
+	caption->setForegroundRole(QPalette::PlaceholderText);
+	nameColumn->addWidget(caption);
+
+	// New multiviews get a unique suggested name, selected so typing replaces it
+	if (isNew_ && config_.name.trimmed().isEmpty()) {
+		QString base = LG_TEXT("EditDialog.DefaultName");
+		QString candidate = base;
+		for (int n = 2; GetConfigManager()->isNameTaken(candidate, QString()); n++)
+			candidate = QString("%1 %2").arg(base).arg(n);
+		config_.name = candidate;
+	}
 	nameEdit_ = new QLineEdit(config_.name);
-	if (isNew_)
-		nameEdit_->setPlaceholderText(LG_TEXT("EditDialog.NamePlaceholder"));
-	nameLayout->addWidget(nameEdit_);
-	mainLayout->addLayout(nameLayout);
+	nameEdit_->setMinimumWidth(320);
+	nameEdit_->setPlaceholderText(LG_TEXT("EditDialog.NamePlaceholder"));
+	nameColumn->addWidget(nameEdit_);
 
-	// Two-pane layout
-	auto *paneLayout = new QHBoxLayout();
+	errorLabel_ = new QLabel();
+	QPalette errorPalette = errorLabel_->palette();
+	errorPalette.setColor(QPalette::WindowText, WidgetTypeColor(WidgetType::Program));
+	errorLabel_->setPalette(errorPalette);
+	errorLabel_->setMinimumHeight(errorLabel_->fontMetrics().height());
+	nameColumn->addWidget(errorLabel_);
+	header->addLayout(nameColumn);
+	header->addStretch(1);
 
-	// Left pane: grid editor
-	auto *leftLayout = new QVBoxLayout();
-	gridEditor_ = new GridEditorWidget();
-	leftLayout->addWidget(gridEditor_, 1);
+	auto *templateButton = new QToolButton();
+	templateButton->setText(LG_TEXT("EditDialog.StartFromTemplate"));
+	templateButton->setPopupMode(QToolButton::InstantPopup);
+	templateButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+	templateMenu_ = new QMenu(templateButton);
+	templateButton->setMenu(templateMenu_);
+	connect(templateMenu_, &QMenu::aboutToShow, this, &MultiviewEditDialog::populateTemplateMenu);
+	header->addWidget(templateButton, 0, Qt::AlignTop);
+	mainLayout->addLayout(header);
 
-	// Template dropdown
-	auto *templateLayout = new QHBoxLayout();
-	templateLayout->addWidget(new QLabel(LG_TEXT("EditDialog.Template")));
-	templateCombo_ = new QComboBox();
-	templateCombo_->addItem(LG_TEXT("EditDialog.TemplateCurrent"));
-	QStringList templateNames = GetConfigManager()->templateNames();
-	templateNames.sort(Qt::CaseInsensitive);
-	for (const QString &name : templateNames)
-		templateCombo_->addItem(name);
-	templateLayout->addWidget(templateCombo_, 1);
-	leftLayout->addLayout(templateLayout);
+	// Body
+	layoutEditor_ = new LayoutEditorWidget();
+	LayoutState state;
+	state.rows = config_.gridRows;
+	state.cols = config_.gridCols;
+	state.cells = config_.cells;
+	state.lineWidth = config_.gridBorderWidth;
+	state.lineColor = config_.gridLineColor;
+	layoutEditor_->setLayoutState(state);
+	mainLayout->addWidget(layoutEditor_, 1);
 
-	paneLayout->addLayout(leftLayout, 3);
+	// Footer
+	auto *footer = new QHBoxLayout();
+	infoLabel_ = new QLabel();
+	infoLabel_->setForegroundRole(QPalette::PlaceholderText);
+	footer->addWidget(infoLabel_, 1);
 
-	// Right pane: grid settings and buttons
-	auto *rightLayout = new QVBoxLayout();
+	auto *cancelButton = new QPushButton(LG_TEXT("EditDialog.Cancel"));
+	cancelButton->setAutoDefault(false);
+	footer->addWidget(cancelButton);
+	primaryButton_ =
+		new QPushButton(isNew ? LG_TEXT("EditDialog.CreateAndOpen") : LG_TEXT("EditDialog.SaveChanges"));
+	// Enter must not save from arbitrary fields (the inspector has text boxes);
+	// only the name field handles it, below
+	primaryButton_->setAutoDefault(false);
+	primaryButton_->setDefault(false);
+	footer->addWidget(primaryButton_);
+	mainLayout->addLayout(footer);
 
-	// Grid size controls
-	auto *gridSettingsForm = new QFormLayout();
-	rowsSpin_ = new QSpinBox();
-	rowsSpin_->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
-	rowsSpin_->setValue(config_.gridRows);
-	gridSettingsForm->addRow(LG_TEXT("EditDialog.Rows"), rowsSpin_);
-
-	colsSpin_ = new QSpinBox();
-	colsSpin_->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
-	colsSpin_->setValue(config_.gridCols);
-	gridSettingsForm->addRow(LG_TEXT("EditDialog.Columns"), colsSpin_);
-
-	// Grid border width
-	borderWidthSpin_ = new QSpinBox();
-	borderWidthSpin_->setRange(1, 10);
-	borderWidthSpin_->setValue(config_.gridBorderWidth);
-	gridSettingsForm->addRow(LG_TEXT("EditDialog.BorderWidth"), borderWidthSpin_);
-
-	// Grid line color
-	gridLineColor_ = config_.gridLineColor;
-	lineColorBtn_ = new QPushButton(LG_TEXT("EditDialog.LineColorChoose"));
-	lineColorBtn_->setAutoFillBackground(true);
-	auto updateColorBtnStyle = [this]() {
-		lineColorBtn_->setStyleSheet(QString("background-color: %1; color: %2;")
-						     .arg(gridLineColor_.name())
-						     .arg(gridLineColor_.lightness() > 127 ? "black" : "white"));
-	};
-	updateColorBtnStyle();
-	connect(lineColorBtn_, &QPushButton::clicked, this, [this, updateColorBtnStyle]() {
-		QColor c = QColorDialog::getColor(gridLineColor_, this, LG_TEXT("EditDialog.ChooseLineColor"));
-		if (c.isValid()) {
-			gridLineColor_ = c;
-			updateColorBtnStyle();
-		}
+	connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);
+	connect(primaryButton_, &QPushButton::clicked, this, &MultiviewEditDialog::onConfirm);
+	connect(nameEdit_, &QLineEdit::textChanged, this, &MultiviewEditDialog::onNameChanged);
+	connect(nameEdit_, &QLineEdit::returnPressed, this, [this]() {
+		if (primaryButton_->isEnabled())
+			onConfirm();
 	});
-	gridSettingsForm->addRow(LG_TEXT("EditDialog.LineColor"), lineColorBtn_);
+	connect(layoutEditor_, &LayoutEditorWidget::modifiedChanged, this, &MultiviewEditDialog::updateInfo);
 
-	rightLayout->addLayout(gridSettingsForm);
-	rightLayout->addSpacing(10);
-
-	// Widget action buttons
-	setWidgetBtn_ = new QPushButton(LG_TEXT("EditDialog.SetWidget"));
-	editWidgetBtn_ = new QPushButton(LG_TEXT("EditDialog.EditWidget"));
-	mergeBtn_ = new QPushButton(LG_TEXT("EditDialog.MergeWidgets"));
-	resetBtn_ = new QPushButton(LG_TEXT("EditDialog.ResetWidgets"));
-
-	rightLayout->addWidget(setWidgetBtn_);
-	rightLayout->addWidget(editWidgetBtn_);
-	rightLayout->addSpacing(10);
-	rightLayout->addWidget(mergeBtn_);
-	rightLayout->addWidget(resetBtn_);
-	rightLayout->addStretch();
-
-	paneLayout->addLayout(rightLayout, 1);
-	mainLayout->addLayout(paneLayout, 1);
-
-	// Dialog buttons
-	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-	connect(buttons, &QDialogButtonBox::accepted, this, &MultiviewEditDialog::onConfirm);
-	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-	mainLayout->addWidget(buttons);
-
-	gridEditor_->setGrid(config_.gridRows, config_.gridCols, config_.cells);
-
-	// Connections
-	connect(setWidgetBtn_, &QPushButton::clicked, this, &MultiviewEditDialog::onSetWidget);
-	connect(editWidgetBtn_, &QPushButton::clicked, this, &MultiviewEditDialog::onEditWidget);
-	connect(mergeBtn_, &QPushButton::clicked, this, &MultiviewEditDialog::onMergeWidgets);
-	connect(resetBtn_, &QPushButton::clicked, this, &MultiviewEditDialog::onResetWidgets);
-	connect(templateCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&MultiviewEditDialog::onTemplateChanged);
-	connect(gridEditor_, &GridEditorWidget::selectionChanged, this, &MultiviewEditDialog::onSelectionChanged);
-	connect(rowsSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MultiviewEditDialog::onGridSizeChanged);
-	connect(colsSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MultiviewEditDialog::onGridSizeChanged);
-
-	onSelectionChanged();
-
-	// Lock the dialog to its laid-out size so it cannot be resized
-	layout()->setSizeConstraint(QLayout::SetFixedSize);
-}
-
-void MultiviewEditDialog::onSetWidget()
-{
-	int idx = gridEditor_->selectedCellIndex();
-	WidgetConfig current;
-	if (idx >= 0)
-		current = gridEditor_->cells()[idx].widget;
-
-	CellConfigDialog dlg(current, this);
-	if (dlg.exec() == QDialog::Accepted) {
-		gridEditor_->setWidgetForSelected(dlg.result());
+	onNameChanged();
+	updateInfo();
+	if (isNew_) {
+		nameEdit_->setFocus();
+		nameEdit_->selectAll();
 	}
 }
 
-void MultiviewEditDialog::onEditWidget()
+void MultiviewEditDialog::populateTemplateMenu()
 {
-	onSetWidget(); // Same behavior - opens the config dialog for the selected cell
+	templateMenu_->clear();
+	ConfigManager *cm = GetConfigManager();
+
+	QString builtIn = cm->defaultTemplate().name;
+	QStringList names = cm->templateNames();
+	names.removeAll(builtIn);
+	names.sort(Qt::CaseInsensitive);
+	names.prepend(builtIn);
+
+	for (const QString &name : names) {
+		QAction *action = templateMenu_->addAction(TemplateThumbnail(cm->getTemplate(name)), name);
+		connect(action, &QAction::triggered, this, [this, name]() { applyTemplate(name); });
+	}
 }
 
-void MultiviewEditDialog::onMergeWidgets()
+void MultiviewEditDialog::applyTemplate(const QString &name)
 {
-	if (!gridEditor_->canMergeSelected()) {
-		QMessageBox::warning(this, LG_TEXT("EditDialog.CannotMerge"), LG_TEXT("EditDialog.CannotMergeMsg"));
+	ConfigManager *cm = GetConfigManager();
+	if (!cm->hasTemplate(name))
 		return;
+	TemplateConfig tmpl = cm->getTemplate(name);
+
+	// Templates carry no line style, so the current one stays
+	LayoutState state = layoutEditor_->layoutState();
+	state.rows = tmpl.gridRows;
+	state.cols = tmpl.gridCols;
+	state.cells = tmpl.cells;
+	layoutEditor_->applyLayout(state, QString(LG_TEXT("EditDialog.Undo.Template")).arg(name),
+				   QString(LG_TEXT("EditDialog.TemplateApplied")).arg(name));
+}
+
+void MultiviewEditDialog::onNameChanged()
+{
+	QString name = nameEdit_->text().trimmed();
+	QString error;
+	if (name.isEmpty())
+		error = LG_TEXT("EditDialog.NameEmpty");
+	else if (GetConfigManager()->isNameTaken(name, config_.id))
+		error = QString(LG_TEXT("EditDialog.NameTaken")).arg(name);
+
+	errorLabel_->setText(error);
+	primaryButton_->setEnabled(error.isEmpty());
+
+	if (!isNew_)
+		setWindowTitle(QString(LG_TEXT("EditDialog.EditTitle")).arg(name.isEmpty() ? config_.name : name));
+	updateInfo();
+}
+
+bool MultiviewEditDialog::hasUnsavedChanges() const
+{
+	if (layoutEditor_->isModified())
+		return true;
+	return !isNew_ && nameEdit_->text().trimmed() != config_.name;
+}
+
+void MultiviewEditDialog::updateInfo()
+{
+	if (isNew_)
+		infoLabel_->clear();
+	else
+		infoLabel_->setText(hasUnsavedChanges() ? LG_TEXT("EditDialog.UnsavedChanges")
+							: LG_TEXT("EditDialog.NoChanges"));
+}
+
+void MultiviewEditDialog::reject()
+{
+	if (!skipDiscardPrompt_ && hasUnsavedChanges()) {
+		QMessageBox box(QMessageBox::Question, windowTitle(), LG_TEXT("EditDialog.DiscardMsg"),
+				QMessageBox::NoButton, this);
+		QPushButton *discard = box.addButton(LG_TEXT("EditDialog.Discard"), QMessageBox::DestructiveRole);
+		QPushButton *keep = box.addButton(LG_TEXT("EditDialog.KeepEditing"), QMessageBox::RejectRole);
+		box.setDefaultButton(keep);
+		box.setEscapeButton(keep);
+		box.exec();
+		if (box.clickedButton() != discard)
+			return;
 	}
-	gridEditor_->mergeSelected();
-}
-
-void MultiviewEditDialog::onResetWidgets()
-{
-	gridEditor_->resetSelected();
-}
-
-void MultiviewEditDialog::onTemplateChanged(int index)
-{
-	if (index <= 0)
-		return; // "(Current)" selected
-
-	QString templateName = templateCombo_->currentText();
-	if (!GetConfigManager()->hasTemplate(templateName))
-		return;
-
-	auto reply = QMessageBox::question(this, LG_TEXT("EditDialog.ApplyTemplate"),
-					   LG_TEXT("EditDialog.ApplyTemplateMsg"), QMessageBox::Yes | QMessageBox::No);
-	if (reply == QMessageBox::Yes) {
-		loadTemplate(GetConfigManager()->getTemplate(templateName));
-	}
-
-	// Reset combo to "(Current)"
-	templateCombo_->blockSignals(true);
-	templateCombo_->setCurrentIndex(0);
-	templateCombo_->blockSignals(false);
-}
-
-void MultiviewEditDialog::onSelectionChanged()
-{
-	int cellIdx = gridEditor_->selectedCellIndex();
-	bool hasSingleCell = cellIdx >= 0;
-
-	setWidgetBtn_->setEnabled(hasSingleCell);
-	editWidgetBtn_->setEnabled(hasSingleCell && cellIdx < gridEditor_->cells().size() &&
-				   gridEditor_->cells()[cellIdx].widget.type != WidgetType::None);
-	mergeBtn_->setEnabled(gridEditor_->canMergeSelected());
-	resetBtn_->setEnabled(gridEditor_->canResetSelected());
+	QDialog::reject();
 }
 
 void MultiviewEditDialog::onConfirm()
 {
 	QString name = nameEdit_->text().trimmed();
 	if (name.isEmpty()) {
-		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("EditDialog.EnterName"));
+		onNameChanged();
 		return;
 	}
 
@@ -246,12 +267,13 @@ void MultiviewEditDialog::onConfirm()
 	// its own name, or renaming it, is never mistaken for a clash
 	ConfigManager *cm = GetConfigManager();
 	if (cm->isNameTaken(name, config_.id)) {
-		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("ManageDialog.MultiviewExists"));
+		onNameChanged();
 		return;
 	}
 
 	if (!isNew_ && !cm->hasMultiview(config_.id)) {
 		// Deleted while this dialog was open
+		skipDiscardPrompt_ = true;
 		reject();
 		return;
 	}
@@ -270,44 +292,15 @@ void MultiviewEditDialog::onConfirm()
 	accept();
 }
 
-void MultiviewEditDialog::onGridSizeChanged()
-{
-	int newRows = rowsSpin_->value();
-	int newCols = colsSpin_->value();
-	int oldRows = gridEditor_->gridRows();
-	int oldCols = gridEditor_->gridCols();
-
-	if (newRows == oldRows && newCols == oldCols)
-		return;
-
-	// Keep cells that still fit, discard ones outside the new bounds, and
-	// fill uncovered positions with empty cells
-	QVector<CellConfig> newCells = GridModel::Resize(gridEditor_->cells(), newRows, newCols);
-	gridEditor_->setGrid(newRows, newCols, newCells);
-}
-
-void MultiviewEditDialog::loadTemplate(const TemplateConfig &tmpl)
-{
-	rowsSpin_->blockSignals(true);
-	colsSpin_->blockSignals(true);
-	rowsSpin_->setValue(tmpl.gridRows);
-	colsSpin_->setValue(tmpl.gridCols);
-	rowsSpin_->blockSignals(false);
-	colsSpin_->blockSignals(false);
-
-	// Auto-fill is handled by the default template itself (in ConfigManager::defaultTemplate).
-	// User-created templates apply their cells as-is — placeholders stay as placeholders.
-	gridEditor_->setGrid(tmpl.gridRows, tmpl.gridCols, tmpl.cells);
-}
-
 MultiviewConfig MultiviewEditDialog::result() const
 {
+	LayoutState state = layoutEditor_->layoutState();
 	MultiviewConfig mv = config_;
 	mv.name = nameEdit_->text().trimmed();
-	mv.gridRows = gridEditor_->gridRows();
-	mv.gridCols = gridEditor_->gridCols();
-	mv.gridBorderWidth = borderWidthSpin_->value();
-	mv.gridLineColor = gridLineColor_;
-	mv.cells = gridEditor_->cells();
+	mv.gridRows = state.rows;
+	mv.gridCols = state.cols;
+	mv.gridBorderWidth = state.lineWidth;
+	mv.gridLineColor = state.lineColor;
+	mv.cells = state.cells;
 	return mv;
 }
