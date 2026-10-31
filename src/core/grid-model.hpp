@@ -59,6 +59,14 @@ bool CanReset(int rows, int cols, const QVector<CellConfig> &cells, const QSet<Q
 // into empty 1x1 cells. Returns the cells unchanged when CanReset() is false.
 QVector<CellConfig> Reset(int rows, int cols, const QVector<CellConfig> &cells, const QSet<QPoint> &selection);
 
+// True when the selection touches at least one merged (multi-span) cell
+bool CanSplit(int rows, int cols, const QVector<CellConfig> &cells, const QSet<QPoint> &selection);
+
+// Breaks every merged cell the selection touches into 1x1 cells. The content
+// stays on the top-left piece (which keeps its index); the other pieces are new
+// empty cells appended at the end. Cells that are not merged are untouched.
+QVector<CellConfig> Split(int rows, int cols, const QVector<CellConfig> &cells, const QSet<QPoint> &selection);
+
 // Re-fits cells to a new grid size: cells that still start inside the grid are
 // kept with their spans clamped, the rest are dropped, and any uncovered
 // position gets an empty 1x1 cell.

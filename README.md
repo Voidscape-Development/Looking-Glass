@@ -33,39 +33,57 @@ client needs Qt 6.9 or later; with older Qt, start OBS with `QT_QPA_PLATFORM=xcb
 Everything lives under **Tools ▸ Looking Glass**.
 
 1. Choose **Create New Multiview…**
-2. Give it a name. The grid starts from the built-in default template: a 2x2 Preview,
+2. Give it a name. The layout starts from the built-in default template: a 2x2 Preview,
    a 2x2 Program, and the bottom two rows auto-filled with the scenes in your current
-   collection.
-3. Adjust the grid, set widgets on the cells you care about, and click **OK**. The new
-   multiview opens immediately.
+   collection. **Start from template** swaps in any other template.
+3. Fill the cells: drag scenes and sources from the content list onto the canvas, or
+   select cells and click an item. Fine-tune the selection in the inspector.
+4. Click **Create and Open**. The new multiview opens immediately.
 
-### The Grid Editor
+### The Layout Editor
 
-The left pane is a live map of the layout. The right pane holds the grid settings and
-the cell actions.
+The editor is one resizable window with three panes:
+
+* **Content list** (left) — every scene, source and canvas, plus Preview and Program,
+  with a filter box. Scenes currently on air are marked.
+* **Canvas** (center) — the layout drawn the way the multiview window will look, with the
+  real grid lines and labels. A status line underneath describes the selection.
+* **Inspector** (right) — edits whatever is selected: content, label, tally border and
+  safe areas. With nothing selected it shows the grid line width and color. With several
+  cells selected it changes them all at once.
+
+The toolbar above holds the **Rows** and **Columns** boxes, **Merge**, **Split**,
+**Clear**, and **Undo** / **Redo**.
 
 | Action | How |
 |---|---|
 | Select a cell | Click it |
-| Select a range | Click and drag across the grid |
+| Select a range | Click and drag across the canvas |
 | Add to / toggle a selection | Ctrl+click, or Ctrl+drag |
-| Assign content | Select one cell, then **Set Widget** |
-| Change content | Select the cell, then **Edit Widget** |
-| Combine cells | Select a full rectangle, then **Merge Widgets** |
-| Break cells apart / clear them | Select them, then **Reset Widgets** |
+| Extend a selection | Shift+click |
+| Assign content | Drag an item from the list onto a cell, or select cells and click the item |
+| Edit a cell | Select it and use the inspector |
+| Combine cells | Select a full rectangle, then **Merge** or press `M` |
+| Break merged cells apart | Select them, then **Split** (the content stays on the top-left cell) |
+| Empty cells | Select them, then **Clear** or press `Delete` |
+| Undo / redo | `Ctrl+Z`, and `Ctrl+Shift+Z` or `Ctrl+Y` |
+| Deselect | `Esc` |
 
 Merging requires the selection to form a complete rectangle, and any already-merged cell
-it touches must be fully inside the selection — partial overlaps are rejected. Resetting
-splits merged cells back into empty 1x1 cells.
+it touches must be fully inside the selection — partial overlaps are rejected, and the
+status line says why. **Clear** also breaks merged cells back into empty 1x1 cells.
 
-**Rows** and **Columns** resize the grid in place. Cells that still fit are kept (with
-their spans clamped to the new bounds); anything outside the new bounds is dropped and
-replaced with empty cells. **Border Width** (1–10 px) and **Line Color** control the grid
-lines drawn between cells.
+Every change is undoable, including template changes and grid resizes. **Rows** and
+**Columns** resize the grid in place. Cells that still fit are kept (with their spans
+clamped to the new bounds); anything outside the new bounds is dropped and replaced with
+empty cells, and a notice with an **Undo** button tells you when that removed cells with
+content. The grid line width and color are set in the inspector when nothing is selected.
+
+Closing the window with unsaved changes asks before discarding them.
 
 ### Widget Types
 
-Each cell is assigned one widget type from the **Set Widget** dialog:
+Each cell is assigned one widget type, either by dragging content onto it or from the inspector:
 
 | Type | Shows |
 |---|---|

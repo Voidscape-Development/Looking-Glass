@@ -191,6 +191,43 @@ QVector<CellConfig> Reset(int rows, int cols, const QVector<CellConfig> &cells, 
 	return result;
 }
 
+bool CanSplit(int rows, int cols, const QVector<CellConfig> &cells, const QSet<QPoint> &selection)
+{
+	QVector<int> owners = Ownership(rows, cols, cells);
+	for (int idx : TouchedCells(rows, cols, owners, selection)) {
+		if (cells[idx].rowSpan > 1 || cells[idx].colSpan > 1)
+			return true;
+	}
+	return false;
+}
+
+QVector<CellConfig> Split(int rows, int cols, const QVector<CellConfig> &cells, const QSet<QPoint> &selection)
+{
+	QVector<int> owners = Ownership(rows, cols, cells);
+	QSet<int> touchedSet = TouchedCells(rows, cols, owners, selection);
+	QVector<int> touched(touchedSet.begin(), touchedSet.end());
+	std::sort(touched.begin(), touched.end());
+
+	QVector<CellConfig> result = cells;
+	QVector<CellConfig> pieces;
+	for (int idx : touched) {
+		const CellConfig &original = cells[idx];
+		if (original.rowSpan <= 1 && original.colSpan <= 1)
+			continue;
+
+		result[idx].rowSpan = 1;
+		result[idx].colSpan = 1;
+		for (int r = original.row; r < original.row + original.rowSpan; r++) {
+			for (int c = original.col; c < original.col + original.colSpan; c++) {
+				if (r != original.row || c != original.col)
+					pieces.append(EmptyCell(r, c));
+			}
+		}
+	}
+	result += pieces;
+	return result;
+}
+
 QVector<CellConfig> Resize(const QVector<CellConfig> &cells, int newRows, int newCols)
 {
 	return Normalize(newRows, newCols, cells);

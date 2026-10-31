@@ -270,6 +270,47 @@ private slots:
 		QCOMPARE(GridModel::CellName(1, 1, 3, 1), QString("B2:B4"));
 	}
 
+	void splitKeepsContentOnTopLeftPiece()
+	{
+		QVector<CellConfig> cells =
+			GridModel::Merge(3, 3, Uniform(3, 3, WidgetType::Program), Rect(0, 0, 2, 2));
+		cells.last().widget.type = WidgetType::Scene;
+		cells.last().widget.sceneName = "Cam";
+		QVERIFY(GridModel::CanSplit(3, 3, cells, Rect(1, 1, 1, 1)));
+
+		QVector<CellConfig> split = GridModel::Split(3, 3, cells, Rect(1, 1, 1, 1));
+		QVERIFY(IsValidLayout(3, 3, split));
+		QCOMPARE(split.size(), 9);
+
+		const CellConfig *topLeft = CellAt(split, 0, 0);
+		QVERIFY(topLeft);
+		QCOMPARE(topLeft->rowSpan, 1);
+		QCOMPARE(topLeft->colSpan, 1);
+		QCOMPARE(topLeft->widget.sceneName, QString("Cam"));
+		// The other three pieces are empty
+		QCOMPARE(CellAt(split, 0, 1)->widget.type, WidgetType::None);
+		QCOMPARE(CellAt(split, 1, 0)->widget.type, WidgetType::None);
+		QCOMPARE(CellAt(split, 1, 1)->widget.type, WidgetType::None);
+		// Cells outside the merged one keep their content
+		QCOMPARE(CellAt(split, 2, 2)->widget.type, WidgetType::Program);
+	}
+
+	void splitLeavesPlainCellsAndOtherMergesAlone()
+	{
+		QVector<CellConfig> cells = Uniform(3, 3, WidgetType::Program);
+		QVERIFY(!GridModel::CanSplit(3, 3, cells, Rect(0, 0, 3, 3)));
+		QCOMPARE(GridModel::Split(3, 3, cells, Rect(0, 0, 3, 3)).size(), 9);
+
+		cells = GridModel::Merge(3, 3, cells, Rect(0, 0, 1, 2));
+		cells = GridModel::Merge(3, 3, cells, Rect(2, 0, 1, 2));
+		QCOMPARE(cells.size(), 7);
+		QVector<CellConfig> split = GridModel::Split(3, 3, cells, Rect(0, 0, 1, 1));
+		QVERIFY(IsValidLayout(3, 3, split));
+		QCOMPARE(split.size(), 8);
+		// The bottom merge was not selected
+		QCOMPARE(CellAt(split, 2, 0)->colSpan, 2);
+	}
+
 	void selectedCellIndices()
 	{
 		// Merged 2x2 at origin, then 1x1 cells
