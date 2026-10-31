@@ -41,6 +41,7 @@ target_sources(
     src/api/websocket-api.cpp
     src/core/multiview-config.cpp
     src/core/grid-model.cpp
+    src/core/content-ref.cpp
     src/core/config-manager.cpp
     src/ui/tools-menu.cpp
     src/ui/grid-editor-widget.cpp

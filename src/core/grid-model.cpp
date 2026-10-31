@@ -196,6 +196,41 @@ QVector<CellConfig> Resize(const QVector<CellConfig> &cells, int newRows, int ne
 	return Normalize(newRows, newCols, cells);
 }
 
+int ContentCellsLost(const QVector<CellConfig> &cells, int newRows, int newCols)
+{
+	newRows = std::clamp(newRows, kMinGridSize, kMaxGridSize);
+	newCols = std::clamp(newCols, kMinGridSize, kMaxGridSize);
+
+	int lost = 0;
+	for (const CellConfig &cell : cells) {
+		if (cell.widget.type == WidgetType::None)
+			continue;
+		if (cell.row < 0 || cell.col < 0 || cell.row >= newRows || cell.col >= newCols)
+			lost++;
+	}
+	return lost;
+}
+
+QString CellName(int row, int col, int rowSpan, int colSpan)
+{
+	auto one = [](int r, int c) {
+		return QString(QChar('A' + std::max(0, c))) + QString::number(r + 1);
+	};
+	QString name = one(row, col);
+	if (rowSpan > 1 || colSpan > 1)
+		name += ':' + one(row + std::max(1, rowSpan) - 1, col + std::max(1, colSpan) - 1);
+	return name;
+}
+
+QVector<int> SelectedCellIndices(int rows, int cols, const QVector<CellConfig> &cells, const QSet<QPoint> &selection)
+{
+	QVector<int> owners = Ownership(rows, cols, cells);
+	QSet<int> touched = TouchedCells(rows, cols, owners, selection);
+	QVector<int> result(touched.begin(), touched.end());
+	std::sort(result.begin(), result.end());
+	return result;
+}
+
 QVector<CellConfig> Normalize(int rows, int cols, const QVector<CellConfig> &cells)
 {
 	rows = std::clamp(rows, kMinGridSize, kMaxGridSize);
