@@ -30,7 +30,7 @@ class QPushButton;
 class LayoutEditorWidget;
 
 /**
- * Window for creating or editing a multiview layout: a name, a template menu
+ * Window for creating or editing a multiview layout: a name, template actions
  * and the full layout editor (content library, canvas and inspector). Every
  * change is undoable; closing with unsaved changes asks first.
  */
@@ -49,6 +49,7 @@ private slots:
 
 private:
 	void populateTemplateMenu();
+	void onSaveAsTemplate();
 	void applyTemplate(const QString &name);
 	void onNameChanged();
 	void updateInfo();

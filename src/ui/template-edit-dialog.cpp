@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
 
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -30,6 +31,18 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QStyle>
 #include <QVBoxLayout>
 
+namespace {
+
+QFrame *makeRule()
+{
+	auto *line = new QFrame();
+	line->setFrameShape(QFrame::HLine);
+	line->setFrameShadow(QFrame::Sunken);
+	return line;
+}
+
+} // namespace
+
 TemplateEditDialog::TemplateEditDialog(const TemplateConfig &tmpl, QWidget *parent) : QDialog(parent), tmpl_(tmpl)
 {
 	setWindowTitle(QString(LG_TEXT("ManageTemplatesDialog.EditTitle")).arg(tmpl.name));
@@ -37,31 +50,36 @@ TemplateEditDialog::TemplateEditDialog(const TemplateConfig &tmpl, QWidget *pare
 	setMinimumSize(900, 560);
 	resize(1180, 720);
 
+	// Header, editor and footer sit edge to edge, divided by rules, so the
+	// canvas gets as much of the window as possible
 	auto *mainLayout = new QVBoxLayout(this);
+	mainLayout->setContentsMargins(0, 0, 0, 0);
+	mainLayout->setSpacing(0);
 
-	// Header: name
+	// Header: name and inline error on one line
 	auto *header = new QHBoxLayout();
-	auto *nameColumn = new QVBoxLayout();
-	nameColumn->setSpacing(2);
-	auto *caption = new QLabel(LG_TEXT("EditDialog.Name"));
-	caption->setForegroundRole(QPalette::PlaceholderText);
-	nameColumn->addWidget(caption);
+	header->setContentsMargins(10, 6, 10, 6);
+	header->setSpacing(8);
 
 	nameEdit_ = new QLineEdit(tmpl_.name);
-	nameEdit_->setMinimumWidth(320);
+	nameEdit_->setMinimumWidth(200);
+	nameEdit_->setMaximumWidth(420);
 	nameEdit_->setPlaceholderText(LG_TEXT("TemplateEditDialog.NamePlaceholder"));
-	nameColumn->addWidget(nameEdit_);
+
+	auto *caption = new QLabel(LG_TEXT("EditDialog.Name"));
+	caption->setBuddy(nameEdit_);
+	header->addWidget(caption);
+	header->addWidget(nameEdit_, 1);
 
 	errorLabel_ = new QLabel();
 	QPalette errorPalette = errorLabel_->palette();
 	errorPalette.setColor(QPalette::WindowText, WidgetTypeColor(WidgetType::Program));
 	errorLabel_->setPalette(errorPalette);
-	errorLabel_->setMinimumHeight(errorLabel_->fontMetrics().height());
-	nameColumn->addWidget(errorLabel_);
-	header->addLayout(nameColumn);
+	header->addWidget(errorLabel_);
 	header->addStretch(1);
 
 	mainLayout->addLayout(header);
+	mainLayout->addWidget(makeRule());
 
 	// Body
 	layoutEditor_ = new LayoutEditorWidget();
@@ -72,9 +90,12 @@ TemplateEditDialog::TemplateEditDialog(const TemplateConfig &tmpl, QWidget *pare
 	state.cells = tmpl_.cells;
 	layoutEditor_->setLayoutState(state);
 	mainLayout->addWidget(layoutEditor_, 1);
+	mainLayout->addWidget(makeRule());
 
 	// Footer
 	auto *footer = new QHBoxLayout();
+	footer->setContentsMargins(10, 6, 10, 6);
+	footer->setSpacing(8);
 	infoLabel_ = new QLabel();
 	infoLabel_->setForegroundRole(QPalette::PlaceholderText);
 	footer->addWidget(infoLabel_, 1);

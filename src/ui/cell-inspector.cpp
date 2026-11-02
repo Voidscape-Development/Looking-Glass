@@ -220,7 +220,7 @@ CellInspector::CellInspector(QWidget *parent) : QWidget(parent)
 
 	auto *inner = new QWidget();
 	auto *innerLayout = new QVBoxLayout(inner);
-	innerLayout->setContentsMargins(14, 12, 14, 14);
+	innerLayout->setContentsMargins(10, 8, 10, 10);
 	stack_ = new QStackedWidget();
 	innerLayout->addWidget(stack_);
 	innerLayout->addStretch(1);

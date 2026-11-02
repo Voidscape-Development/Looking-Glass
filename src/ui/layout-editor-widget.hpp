@@ -72,6 +72,9 @@ public:
 	// an Undo button (no toast when toastText is empty)
 	void applyLayout(const LayoutState &state, const QString &undoText, const QString &toastText);
 
+	// Shows a short message in the status row
+	void showMessage(const QString &text);
+
 	bool isModified() const;
 	QUndoStack *undoStack() const { return undoStack_; }
 

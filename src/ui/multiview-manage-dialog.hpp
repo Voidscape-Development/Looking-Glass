@@ -21,6 +21,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDialog>
 #include <QListWidget>
 
+#include "../core/multiview-config.hpp"
+
 /**
  * Dialog for managing the list of multiviews in the current scene collection.
  * Provides show, edit, rename, delete, duplicate, and create-template actions.
@@ -52,3 +54,12 @@ private:
 	QPushButton *duplicateBtn_;
 	QPushButton *createTemplateBtn_;
 };
+
+// Builds a template from a multiview's layout. Unless preserveSources is set,
+// cells with content become placeholders labelled with what they showed.
+TemplateConfig BuildTemplateFromMultiview(const MultiviewConfig &mv, const QString &name, bool preserveSources);
+
+// Asks for a template name and whether to keep scene and source names, then
+// saves mv's layout as a new template. Returns the new template's name, or an
+// empty string when cancelled.
+QString PromptSaveAsTemplate(QWidget *parent, const MultiviewConfig &mv);

@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "multiview-manage-dialog.hpp"
 #include "multiview-edit-dialog.hpp"
 #include "multiview-window.hpp"
+#include "widget-type-style.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
 
@@ -200,40 +201,18 @@ void ManageMultiviewsDialog::onCreateTemplate()
 		return;
 
 	MultiviewConfig mv = GetConfigManager()->getMultiview(id);
-
-	// Build a custom dialog with name field and preserve-sources checkbox
-	QDialog dlg(this);
-	dlg.setWindowTitle(LG_TEXT("ManageDialog.CreateTemplate"));
-	auto *layout = new QFormLayout(&dlg);
-
-	auto *nameEdit = new QLineEdit(mv.name + LG_TEXT("ManageDialog.TemplateSuffix"));
-	layout->addRow(LG_TEXT("ManageDialog.TemplateNamePrompt"), nameEdit);
-
-	auto *preserveCheck = new QCheckBox(LG_TEXT("ManageDialog.PreserveSources"));
-	preserveCheck->setToolTip(LG_TEXT("ManageDialog.PreserveSourcesTooltip"));
-	layout->addRow(preserveCheck);
-
-	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-	connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-	layout->addRow(buttons);
-
-	if (dlg.exec() != QDialog::Accepted)
-		return;
-
-	QString templateName = nameEdit->text().trimmed();
+	QString templateName = PromptSaveAsTemplate(this, mv);
 	if (templateName.isEmpty())
 		return;
 
-	if (GetConfigManager()->hasTemplate(templateName)) {
-		QMessageBox::warning(this, LG_TEXT("Common.Error"), LG_TEXT("ManageDialog.TemplateExists"));
-		return;
-	}
+	QMessageBox::information(this, LG_TEXT("ManageDialog.TemplateCreated"),
+				 QString(LG_TEXT("ManageDialog.TemplateCreatedMsg")).arg(templateName));
+}
 
-	bool preserveSources = preserveCheck->isChecked();
-
+TemplateConfig BuildTemplateFromMultiview(const MultiviewConfig &mv, const QString &name, bool preserveSources)
+{
 	TemplateConfig tmpl;
-	tmpl.name = templateName;
+	tmpl.name = name;
 	tmpl.gridRows = mv.gridRows;
 	tmpl.gridCols = mv.gridCols;
 	tmpl.preserveSources = preserveSources;
@@ -272,8 +251,58 @@ void ManageMultiviewsDialog::onCreateTemplate()
 		// When preserveSources is true, keep the cell exactly as-is
 		tmpl.cells.append(tc);
 	}
+	return tmpl;
+}
 
-	GetConfigManager()->addTemplate(tmpl);
-	QMessageBox::information(this, LG_TEXT("ManageDialog.TemplateCreated"),
-				 QString(LG_TEXT("ManageDialog.TemplateCreatedMsg")).arg(templateName));
+QString PromptSaveAsTemplate(QWidget *parent, const MultiviewConfig &mv)
+{
+	QDialog dlg(parent);
+	dlg.setWindowTitle(LG_TEXT("ManageDialog.CreateTemplate"));
+	auto *layout = new QFormLayout(&dlg);
+
+	QString base = mv.name.trimmed();
+	auto *nameEdit = new QLineEdit(base + LG_TEXT("ManageDialog.TemplateSuffix"));
+	nameEdit->setMinimumWidth(260);
+	nameEdit->selectAll();
+	layout->addRow(LG_TEXT("ManageDialog.TemplateNamePrompt"), nameEdit);
+
+	auto *errorLabel = new QLabel();
+	QPalette errorPalette = errorLabel->palette();
+	errorPalette.setColor(QPalette::WindowText, WidgetTypeColor(WidgetType::Program));
+	errorLabel->setPalette(errorPalette);
+	layout->addRow(QString(), errorLabel);
+
+	auto *preserveCheck = new QCheckBox(LG_TEXT("ManageDialog.PreserveSources"));
+	preserveCheck->setToolTip(LG_TEXT("ManageDialog.PreserveSourcesTooltip"));
+	layout->addRow(preserveCheck);
+
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+	QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	layout->addRow(buttons);
+
+	// Validate as the name is typed, so a clash never closes the dialog
+	auto validate = [nameEdit, errorLabel, buttons]() {
+		QString name = nameEdit->text().trimmed();
+		QString error;
+		if (name.isEmpty())
+			error = LG_TEXT("TemplateEditDialog.NameEmpty");
+		else if (GetConfigManager()->hasTemplate(name))
+			error = QString(LG_TEXT("TemplateEditDialog.NameTaken")).arg(name);
+		errorLabel->setText(error);
+		errorLabel->setVisible(!error.isEmpty());
+		buttons->button(QDialogButtonBox::Ok)->setEnabled(error.isEmpty());
+	};
+	QObject::connect(nameEdit, &QLineEdit::textChanged, &dlg, validate);
+	validate();
+
+	if (dlg.exec() != QDialog::Accepted)
+		return QString();
+
+	QString templateName = nameEdit->text().trimmed();
+	if (templateName.isEmpty() || GetConfigManager()->hasTemplate(templateName))
+		return QString();
+
+	GetConfigManager()->addTemplate(BuildTemplateFromMultiview(mv, templateName, preserveCheck->isChecked()));
+	return templateName;
 }
