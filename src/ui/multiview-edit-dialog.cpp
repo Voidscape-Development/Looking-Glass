@@ -18,15 +18,16 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "multiview-edit-dialog.hpp"
 #include "layout-editor-widget.hpp"
+#include "multiview-manage-dialog.hpp"
 #include "multiview-window.hpp"
 #include "widget-type-style.hpp"
 #include "../plugin.hpp"
 #include "../core/config-manager.hpp"
 #include "../core/grid-model.hpp"
 
-#include <QAction>
+#include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
-#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -36,32 +37,97 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPushButton>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWidgetAction>
 
 namespace {
 
+constexpr QSize kThumbSize(144, 81);
+
 // Small picture of a template's grid, filled with the widget type colors
-QIcon TemplateThumbnail(const TemplateConfig &tmpl)
+QPixmap TemplateThumbnail(const TemplateConfig &tmpl, const QSize &size, qreal ratio)
 {
-	const QSize size(64, 36);
-	const qreal ratio = 2.0;
 	QPixmap pixmap(size * ratio);
 	pixmap.setDevicePixelRatio(ratio);
-	pixmap.fill(QColor(0x1c, 0x1d, 0x22));
+	pixmap.fill(QColor(0x55, 0x5b, 0x6e));
 
 	QPainter painter(&pixmap);
 	int rows = qMax(1, tmpl.gridRows);
 	int cols = qMax(1, tmpl.gridCols);
+
+	// Empty slots first, then the template's cells over them
+	auto slot = [&](int row, int col, int rowSpan, int colSpan) {
+		int x0 = qRound((double)col * size.width() / cols);
+		int x1 = qRound((double)(col + colSpan) * size.width() / cols);
+		int y0 = qRound((double)row * size.height() / rows);
+		int y1 = qRound((double)(row + rowSpan) * size.height() / rows);
+		return QRect(x0, y0, x1 - x0, y1 - y0).adjusted(1, 1, -1, -1);
+	};
+	for (int r = 0; r < rows; r++) {
+		for (int c = 0; c < cols; c++)
+			painter.fillRect(slot(r, c, 1, 1), QColor(0x2f, 0x33, 0x41));
+	}
 	for (const CellConfig &cell : tmpl.cells) {
-		int x0 = qRound((double)cell.col * size.width() / cols);
-		int x1 = qRound((double)(cell.col + cell.colSpan) * size.width() / cols);
-		int y0 = qRound((double)cell.row * size.height() / rows);
-		int y1 = qRound((double)(cell.row + cell.rowSpan) * size.height() / rows);
-		QColor fill = cell.widget.type == WidgetType::None ? QColor(0x3a, 0x3c, 0x46)
-								   : WidgetTypeColor(cell.widget.type);
-		painter.fillRect(QRect(x0, y0, x1 - x0, y1 - y0).adjusted(1, 1, 0, 0), fill);
+		QColor fill = cell.widget.type == WidgetType::None ? QColor(0x2f, 0x33, 0x41)
+								   : WidgetTypeColor(cell.widget.type).darker(170);
+		painter.fillRect(slot(cell.row, cell.col, cell.rowSpan, cell.colSpan), fill);
 	}
 	painter.end();
-	return QIcon(pixmap);
+	return pixmap;
+}
+
+QString TemplateSummary(const TemplateConfig &tmpl)
+{
+	int filled = 0;
+	for (const CellConfig &cell : tmpl.cells) {
+		if (cell.widget.type != WidgetType::None)
+			filled++;
+	}
+	return QString(LG_TEXT("EditDialog.TemplateSummary")).arg(tmpl.gridRows).arg(tmpl.gridCols).arg(filled);
+}
+
+// One card in the template picker: thumbnail, name and a one-line summary.
+// The labels pass mouse events through so the whole card is one button.
+QToolButton *MakeTemplateCard(const TemplateConfig &tmpl, qreal ratio)
+{
+	auto *card = new QToolButton();
+	card->setCursor(Qt::PointingHandCursor);
+	card->setToolTip(tmpl.name);
+
+	auto *v = new QVBoxLayout(card);
+	v->setContentsMargins(6, 6, 6, 6);
+	v->setSpacing(3);
+
+	auto *thumb = new QLabel();
+	thumb->setPixmap(TemplateThumbnail(tmpl, kThumbSize, ratio));
+	thumb->setFixedSize(kThumbSize);
+	v->addWidget(thumb);
+
+	auto *title = new QLabel();
+	title->setText(title->fontMetrics().elidedText(tmpl.name, Qt::ElideRight, kThumbSize.width()));
+	v->addWidget(title);
+
+	auto *summary = new QLabel();
+	QFont sf = summary->font();
+	if (sf.pointSizeF() > 0)
+		sf.setPointSizeF(sf.pointSizeF() * 0.85);
+	summary->setFont(sf);
+	summary->setForegroundRole(QPalette::PlaceholderText);
+	summary->setText(summary->fontMetrics().elidedText(TemplateSummary(tmpl), Qt::ElideRight, kThumbSize.width()));
+	v->addWidget(summary);
+
+	for (QLabel *label : {thumb, title, summary})
+		label->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+	card->setFixedSize(v->sizeHint());
+	return card;
+}
+
+QFrame *MakeRule()
+{
+	auto *line = new QFrame();
+	line->setFrameShape(QFrame::HLine);
+	line->setFrameShadow(QFrame::Sunken);
+	return line;
 }
 
 } // namespace
@@ -85,15 +151,16 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 		config_.cells = def.cells;
 	}
 
+	// Header, editor and footer sit edge to edge, divided by rules, so the
+	// canvas gets as much of the window as possible
 	auto *mainLayout = new QVBoxLayout(this);
+	mainLayout->setContentsMargins(0, 0, 0, 0);
+	mainLayout->setSpacing(0);
 
-	// Header: name and template menu
+	// Header: name, inline error and template actions on one line
 	auto *header = new QHBoxLayout();
-	auto *nameColumn = new QVBoxLayout();
-	nameColumn->setSpacing(2);
-	auto *caption = new QLabel(LG_TEXT("EditDialog.Name"));
-	caption->setForegroundRole(QPalette::PlaceholderText);
-	nameColumn->addWidget(caption);
+	header->setContentsMargins(10, 6, 10, 6);
+	header->setSpacing(8);
 
 	// New multiviews get a unique suggested name, selected so typing replaces it
 	if (isNew_ && config_.name.trimmed().isEmpty()) {
@@ -104,28 +171,41 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 		config_.name = candidate;
 	}
 	nameEdit_ = new QLineEdit(config_.name);
-	nameEdit_->setMinimumWidth(320);
+	nameEdit_->setMinimumWidth(200);
+	nameEdit_->setMaximumWidth(420);
 	nameEdit_->setPlaceholderText(LG_TEXT("EditDialog.NamePlaceholder"));
-	nameColumn->addWidget(nameEdit_);
+
+	auto *caption = new QLabel(LG_TEXT("EditDialog.Name"));
+	caption->setBuddy(nameEdit_);
+	header->addWidget(caption);
+	header->addWidget(nameEdit_, 1);
 
 	errorLabel_ = new QLabel();
 	QPalette errorPalette = errorLabel_->palette();
 	errorPalette.setColor(QPalette::WindowText, WidgetTypeColor(WidgetType::Program));
 	errorLabel_->setPalette(errorPalette);
-	errorLabel_->setMinimumHeight(errorLabel_->fontMetrics().height());
-	nameColumn->addWidget(errorLabel_);
-	header->addLayout(nameColumn);
+	header->addWidget(errorLabel_);
 	header->addStretch(1);
 
 	auto *templateButton = new QToolButton();
 	templateButton->setText(LG_TEXT("EditDialog.StartFromTemplate"));
+	templateButton->setToolTip(LG_TEXT("EditDialog.StartFromTemplateTip"));
 	templateButton->setPopupMode(QToolButton::InstantPopup);
 	templateButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
 	templateMenu_ = new QMenu(templateButton);
 	templateButton->setMenu(templateMenu_);
 	connect(templateMenu_, &QMenu::aboutToShow, this, &MultiviewEditDialog::populateTemplateMenu);
-	header->addWidget(templateButton, 0, Qt::AlignTop);
+	header->addWidget(templateButton);
+
+	auto *saveTemplateButton = new QPushButton(LG_TEXT("EditDialog.SaveAsTemplate"));
+	saveTemplateButton->setFlat(true);
+	saveTemplateButton->setAutoDefault(false);
+	saveTemplateButton->setToolTip(LG_TEXT("EditDialog.SaveAsTemplateTip"));
+	connect(saveTemplateButton, &QPushButton::clicked, this, &MultiviewEditDialog::onSaveAsTemplate);
+	header->addWidget(saveTemplateButton);
+
 	mainLayout->addLayout(header);
+	mainLayout->addWidget(MakeRule());
 
 	// Body
 	layoutEditor_ = new LayoutEditorWidget();
@@ -137,9 +217,12 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 	state.lineColor = config_.gridLineColor;
 	layoutEditor_->setLayoutState(state);
 	mainLayout->addWidget(layoutEditor_, 1);
+	mainLayout->addWidget(MakeRule());
 
 	// Footer
 	auto *footer = new QHBoxLayout();
+	footer->setContentsMargins(10, 6, 10, 6);
+	footer->setSpacing(8);
 	infoLabel_ = new QLabel();
 	infoLabel_->setForegroundRole(QPalette::PlaceholderText);
 	footer->addWidget(infoLabel_, 1);
@@ -175,6 +258,7 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 
 void MultiviewEditDialog::populateTemplateMenu()
 {
+	// clear() deletes the previous picker along with its action
 	templateMenu_->clear();
 	ConfigManager *cm = GetConfigManager();
 
@@ -184,10 +268,38 @@ void MultiviewEditDialog::populateTemplateMenu()
 	names.sort(Qt::CaseInsensitive);
 	names.prepend(builtIn);
 
+	// A grid of thumbnail cards, two per row, inside the drop-down
+	auto *picker = new QWidget();
+	auto *grid = new QGridLayout(picker);
+	grid->setContentsMargins(8, 8, 8, 8);
+	grid->setSpacing(6);
+
+	const qreal ratio = devicePixelRatioF();
+	constexpr int kColumns = 2;
+	int i = 0;
 	for (const QString &name : names) {
-		QAction *action = templateMenu_->addAction(TemplateThumbnail(cm->getTemplate(name)), name);
-		connect(action, &QAction::triggered, this, [this, name]() { applyTemplate(name); });
+		QToolButton *card = MakeTemplateCard(cm->getTemplate(name), ratio);
+		connect(card, &QToolButton::clicked, this, [this, name]() {
+			templateMenu_->close();
+			applyTemplate(name);
+		});
+		grid->addWidget(card, i / kColumns, i % kColumns);
+		i++;
 	}
+
+	auto *action = new QWidgetAction(templateMenu_);
+	action->setDefaultWidget(picker);
+	templateMenu_->addAction(action);
+}
+
+void MultiviewEditDialog::onSaveAsTemplate()
+{
+	MultiviewConfig mv = result();
+	if (mv.name.isEmpty())
+		mv.name = config_.name;
+	QString name = PromptSaveAsTemplate(this, mv);
+	if (!name.isEmpty())
+		layoutEditor_->showMessage(QString(LG_TEXT("EditDialog.TemplateSaved")).arg(name));
 }
 
 void MultiviewEditDialog::applyTemplate(const QString &name)

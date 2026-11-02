@@ -149,8 +149,9 @@ LayoutEditorWidget::LayoutEditorWidget(QWidget *parent) : QWidget(parent)
 	outer->setContentsMargins(0, 0, 0, 0);
 	outer->setSpacing(0);
 
+	// The toolbar belongs to the canvas column (buildCenter), so the library
+	// and inspector run the full height of the editor
 	buildToolbar();
-	outer->addWidget(toolbar_);
 
 	library_ = new ContentLibraryWidget();
 	inspector_ = new CellInspector();
@@ -221,6 +222,7 @@ void LayoutEditorWidget::buildToolbar()
 	toolbar_->setMovable(false);
 	toolbar_->setFloatable(false);
 	toolbar_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+	toolbar_->setContentsMargins(4, 0, 4, 0);
 
 	rowsSpin_ = new QSpinBox();
 	rowsSpin_->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
@@ -294,14 +296,27 @@ QWidget *LayoutEditorWidget::buildCenter()
 {
 	auto *center = new QWidget();
 	auto *layout = new QVBoxLayout(center);
-	layout->setContentsMargins(8, 8, 8, 8);
-	layout->setSpacing(6);
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
 
+	layout->addWidget(toolbar_);
+	auto *topRule = new QFrame();
+	topRule->setFrameShape(QFrame::HLine);
+	topRule->setFrameShadow(QFrame::Sunken);
+	layout->addWidget(topRule);
+
+	// The canvas keeps its own small margin around the letterboxed output
 	grid_ = new GridEditorWidget();
 	layout->addWidget(grid_, 1);
 
+	auto *bottomRule = new QFrame();
+	bottomRule->setFrameShape(QFrame::HLine);
+	bottomRule->setFrameShadow(QFrame::Sunken);
+	layout->addWidget(bottomRule);
+
 	auto *row = new QHBoxLayout();
-	row->setSpacing(12);
+	row->setContentsMargins(8, 4, 8, 4);
+	row->setSpacing(10);
 
 	statusLabel_ = new QLabel();
 	statusLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -314,11 +329,14 @@ QWidget *LayoutEditorWidget::buildCenter()
 		swatch->setFixedSize(10, 10);
 		swatch->setStyleSheet(
 			QString("background-color: %1; border-radius: 2px;").arg(WidgetTypeColor(type).name()));
-		row->addWidget(swatch);
 		auto *name = new QLabel(WidgetTypeDisplayName(type));
 		name->setForegroundRole(QPalette::PlaceholderText);
-		row->addWidget(name);
-		row->addSpacing(4);
+		// Swatch and name sit together; the row spacing separates entries
+		auto *entry = new QHBoxLayout();
+		entry->setSpacing(4);
+		entry->addWidget(swatch);
+		entry->addWidget(name);
+		row->addLayout(entry);
 	}
 	layout->addLayout(row);
 	return center;
@@ -356,6 +374,11 @@ void LayoutEditorWidget::applyLayout(const LayoutState &state, const QString &un
 	grid_->clearSelection();
 	if (pushState(s, undoText, -1, {}) && !toastText.isEmpty())
 		showToast(toastText);
+}
+
+void LayoutEditorWidget::showMessage(const QString &text)
+{
+	showStatusMessage(text, kStatusMessageMs);
 }
 
 bool LayoutEditorWidget::isModified() const
