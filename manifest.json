@@ -1,0 +1,18 @@
+{
+    "display_name": "Looking Glass - Custom Multiviews",
+    "id": "3801e9f9-e9e4-425d-8357-40e18908758a",
+    "version": "1.0.0",
+    "authors": [
+        "ZombieHDGaming"
+    ],
+    "name": "looking-glass",
+    "description": "Custom, dynamic multiviews for OBS Studio.",
+    "long_description": "Custom, dynamic multiviews for OBS Studio.",
+    "urls": {
+        "repository": "https://github.com/Voidscape-Development/Looking-Glass",
+        "website": "https://github.com/Voidscape-Development/Looking-Glass",
+        "support": "https://github.com/Voidscape-Development/Looking-Glass/issues"
+    },
+    "has_banner": false,
+    "has_icon": false
+}

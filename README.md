@@ -23,7 +23,7 @@ driven remotely over obs-websocket.
 
 ## Requirements
 
-OBS Studio 31.1 or later. (Looking Glass uses the canvas API introduced in that release.)
+OBS Studio 33 or later.
 
 On Linux, multiview windows work under X11 and XWayland. Running OBS as a native Wayland
 client needs Qt 6.9 or later; with older Qt, start OBS with `QT_QPA_PLATFORM=xcb`.
@@ -248,13 +248,13 @@ release builds.
 
 | Platform  | Tool   |
 |-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
+| Windows   | Visual Studio 18 2026 |
+| macOS     | Xcode 26.5 |
 | Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config` |
-| Ubuntu 24.04 | `build-essential` |
+| Ubuntu 26.04 | CMake 3.28.3 |
+| Ubuntu 26.04 | `ninja-build` |
+| Ubuntu 26.04 | `pkg-config` |
+| Ubuntu 26.04 | `build-essential` |
 
 Suggested reading from the plugin template wiki:
 
