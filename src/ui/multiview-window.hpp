@@ -71,6 +71,8 @@ protected:
 	void closeEvent(QCloseEvent *event) override;
 	void changeEvent(QEvent *event) override;
 	void contextMenuEvent(QContextMenuEvent *event) override;
+	void mousePressEvent(QMouseEvent *event) override;
+	void mouseDoubleClickEvent(QMouseEvent *event) override;
 	void onPixelSizeChanged() override;
 
 private:
@@ -79,6 +81,7 @@ private:
 	void saveWindowState();
 	void setOpen(bool open);
 	void openEditDialog();
+	void switchToSceneAt(const QPointF &pos, bool doubleClick);
 	void updateTitle();
 
 	QString id_;

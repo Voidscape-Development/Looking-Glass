@@ -28,9 +28,10 @@ private slots:
 
 	void roundTrip()
 	{
-		const WidgetType types[] = {WidgetType::None,       WidgetType::Preview, WidgetType::Program,
-					    WidgetType::Canvas,     WidgetType::Scene,   WidgetType::Source,
-					    WidgetType::Placeholder};
+		const WidgetType types[] = {WidgetType::None,        WidgetType::Preview,    WidgetType::Program,
+					    WidgetType::Canvas,      WidgetType::Scene,      WidgetType::Source,
+					    WidgetType::Placeholder, WidgetType::AudioMeter, WidgetType::Clock,
+					    WidgetType::Text};
 		for (WidgetType t : types) {
 			ContentRef in;
 			in.type = t;
@@ -100,6 +101,19 @@ private slots:
 		QVERIFY(!w.showStatus);
 	}
 
+	void applyAudioMeter()
+	{
+		WidgetConfig w;
+		ContentRefs::Apply(w, {WidgetType::Scene, "A", "ua"});
+		ContentRefs::Apply(w, {WidgetType::AudioMeter, "Mic", "um"});
+		QCOMPARE(w.type, WidgetType::AudioMeter);
+		QCOMPARE(w.sourceName, QString("Mic"));
+		QCOMPARE(w.sourceUuid, QString("um"));
+		QVERIFY(w.sceneName.isEmpty());
+		QVERIFY(!w.showStatus);
+		QCOMPARE(ContentRefs::FromWidget(w).name, QString("Mic"));
+	}
+
 	void applyCanvasClearsTargets()
 	{
 		WidgetConfig w;
@@ -118,8 +132,8 @@ private slots:
 
 	void applyOtherTypesClearAll()
 	{
-		for (WidgetType t :
-		     {WidgetType::None, WidgetType::Preview, WidgetType::Program, WidgetType::Placeholder}) {
+		for (WidgetType t : {WidgetType::None, WidgetType::Preview, WidgetType::Program,
+				     WidgetType::Placeholder, WidgetType::Clock, WidgetType::Text}) {
 			WidgetConfig w;
 			ContentRefs::Apply(w, {WidgetType::Scene, "A", "ua"});
 			w.canvasName = "c";

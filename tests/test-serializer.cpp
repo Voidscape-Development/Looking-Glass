@@ -40,7 +40,7 @@ MultiviewConfig SampleMultiview()
 	MultiviewConfig mv;
 	mv.id = "8a6f0a52-6f6b-4a5e-9d7c-1f2e3d4c5b6a";
 	mv.name = "Main Wall";
-	mv.gridRows = 2;
+	mv.gridRows = 3;
 	mv.gridCols = 3;
 	mv.gridBorderWidth = 4;
 	mv.gridLineColor = QColor(10, 20, 30);
@@ -49,6 +49,7 @@ MultiviewConfig SampleMultiview()
 	mv.window.screenIndex = 1;
 	mv.window.fullscreen = true;
 	mv.window.open = true;
+	mv.window.clickToSwitch = false;
 
 	CellConfig scene;
 	scene.row = 0;
@@ -83,6 +84,29 @@ MultiviewConfig SampleMultiview()
 	program.widget.type = WidgetType::Program;
 	mv.cells.append(program);
 
+	CellConfig clock;
+	clock.row = 2;
+	clock.widget.type = WidgetType::Clock;
+	clock.widget.clockMode = ClockMode::Countdown;
+	clock.widget.clockTarget = QTime(19, 30, 15);
+	mv.cells.append(clock);
+
+	CellConfig text;
+	text.row = 2;
+	text.col = 1;
+	text.widget.type = WidgetType::Text;
+	text.widget.text = "Line 1\nLine \"2\"";
+	text.widget.textFile = "/tmp/notes.txt";
+	mv.cells.append(text);
+
+	CellConfig meter;
+	meter.row = 2;
+	meter.col = 2;
+	meter.widget.type = WidgetType::AudioMeter;
+	meter.widget.sourceName = "Mic";
+	meter.widget.sourceUuid = "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9";
+	mv.cells.append(meter);
+
 	return mv;
 }
 
@@ -102,6 +126,10 @@ void CompareWidgets(const WidgetConfig &a, const WidgetConfig &b)
 	QCOMPARE(a.labelBgColor, b.labelBgColor);
 	QCOMPARE(a.safeRegion, b.safeRegion);
 	QCOMPARE(a.showStatus, b.showStatus);
+	QCOMPARE(a.clockMode, b.clockMode);
+	QCOMPARE(a.clockTarget, b.clockTarget);
+	QCOMPARE(a.text, b.text);
+	QCOMPARE(a.textFile, b.textFile);
 }
 
 } // namespace
@@ -129,6 +157,7 @@ private slots:
 		QCOMPARE(loaded.window.screenIndex, original.window.screenIndex);
 		QCOMPARE(loaded.window.fullscreen, original.window.fullscreen);
 		QCOMPARE(loaded.window.open, original.window.open);
+		QCOMPARE(loaded.window.clickToSwitch, original.window.clickToSwitch);
 		QCOMPARE(loaded.cells.size(), original.cells.size());
 		for (int i = 0; i < (int)original.cells.size(); i++) {
 			QCOMPARE(loaded.cells[i].row, original.cells[i].row);
@@ -155,6 +184,11 @@ private slots:
 		QCOMPARE(loaded.labelSize, kLabelSizeDefault);
 		QCOMPARE(loaded.safeRegion, false);
 		QCOMPARE(loaded.showStatus, false);
+		QCOMPARE(loaded.clockMode, ClockMode::TimeOfDay);
+		QCOMPARE(loaded.clockTarget, defaults.clockTarget);
+		QVERIFY(loaded.text.isEmpty());
+		QVERIFY(loaded.textFile.isEmpty());
+		QCOMPARE(MultiviewFromJson(Parse("{\"window\": {}}")).window.clickToSwitch, true);
 	}
 
 	void unknownValuesFallBack()
@@ -164,6 +198,10 @@ private slots:
 		QCOMPARE(loaded.type, WidgetType::None);
 		QCOMPARE(loaded.labelBgColor, WidgetConfig().labelBgColor);
 		QCOMPARE(loaded.labelHAlign, Qt::AlignHCenter);
+		WidgetConfig clock =
+			WidgetFromJson(Parse("{\"clock_mode\": \"sundial\", \"clock_target\": \"25:99\"}"));
+		QCOMPARE(clock.clockMode, ClockMode::TimeOfDay);
+		QCOMPARE(clock.clockTarget, WidgetConfig().clockTarget);
 	}
 
 	void labelSizeIsClamped()
@@ -319,6 +357,8 @@ private slots:
 		w.type = WidgetType::Scene;
 		QCOMPARE(w.targetName(), QString("Scene"));
 		w.type = WidgetType::Source;
+		QCOMPARE(w.targetName(), QString("Source"));
+		w.type = WidgetType::AudioMeter;
 		QCOMPARE(w.targetName(), QString("Source"));
 		w.type = WidgetType::Program;
 		QVERIFY(w.targetName().isEmpty());

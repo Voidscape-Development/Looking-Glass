@@ -32,6 +32,8 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
+class QTimeEdit;
 class QPushButton;
 class QSlider;
 class QStackedWidget;
@@ -72,7 +74,15 @@ signals:
 
 private:
 	enum Page { PageLayout, PageSingle, PageMulti };
-	enum MergeId { MergeNone = -1, MergeLabelText = 1, MergeLabelSize, MergeOpacity, MergeLineWidth };
+	enum MergeId {
+		MergeNone = -1,
+		MergeLabelText = 1,
+		MergeLabelSize,
+		MergeOpacity,
+		MergeLineWidth,
+		MergeText,
+		MergeClockTarget
+	};
 
 	// Label controls shared by the single and multi pages
 	struct LabelControls {
@@ -128,6 +138,12 @@ private:
 	QLabel *subtitleLabel_ = nullptr;
 	QButtonGroup *typeGroup_ = nullptr;
 	QComboBox *targetCombo_ = nullptr;
+	QWidget *clockGroup_ = nullptr;
+	QComboBox *clockMode_ = nullptr;
+	QTimeEdit *clockTarget_ = nullptr;
+	QWidget *textGroup_ = nullptr;
+	QPlainTextEdit *textEdit_ = nullptr;
+	QLineEdit *textFile_ = nullptr;
 	QLabel *previewNote_ = nullptr;
 	QLabel *noneNote_ = nullptr;
 	LabelControls single_;

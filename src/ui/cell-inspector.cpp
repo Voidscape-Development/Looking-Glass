@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QFileDialog>
 #include <QFontDatabase>
 #include <QFontDialog>
 #include <QFormLayout>
@@ -41,6 +42,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPainter>
 #include <QPair>
 #include <QPixmap>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
@@ -48,6 +50,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QStringList>
+#include <QTimeEdit>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -66,8 +69,9 @@ const Qt::Alignment kHAligns[3] = {Qt::AlignLeft, Qt::AlignHCenter, Qt::AlignRig
 const char *const kVNames[3] = {"Inspector.Top", "Inspector.Middle", "Inspector.Bottom"};
 const char *const kHNames[3] = {"Inspector.Left", "Inspector.Center", "Inspector.Right"};
 
-const WidgetType kTypeOrder[7] = {WidgetType::Program, WidgetType::Preview,     WidgetType::Scene, WidgetType::Source,
-				  WidgetType::Canvas,  WidgetType::Placeholder, WidgetType::None};
+const WidgetType kTypeOrder[] = {WidgetType::Program,     WidgetType::Preview,    WidgetType::Scene, WidgetType::Source,
+				 WidgetType::Canvas,      WidgetType::AudioMeter, WidgetType::Clock, WidgetType::Text,
+				 WidgetType::Placeholder, WidgetType::None};
 
 QString T(const char *key)
 {
@@ -394,7 +398,7 @@ QWidget *CellInspector::buildSinglePage()
 	grid->setSpacing(4);
 	typeGroup_ = new QButtonGroup(this);
 	typeGroup_->setExclusive(true);
-	for (int i = 0; i < 7; i++) {
+	for (int i = 0; i < (int)std::size(kTypeOrder); i++) {
 		WidgetType type = kTypeOrder[i];
 		QString name = type == WidgetType::None ? T("Inspector.TypeEmpty") : WidgetTypeDisplayName(type);
 		auto *btn = new QToolButton();
@@ -443,6 +447,61 @@ QWidget *CellInspector::buildSinglePage()
 			ref.uuid = targetCombo_->itemData(idx, Qt::UserRole).toString();
 		applyEdit([ref](WidgetConfig &w) { ContentRefs::Apply(w, ref); }, T("Inspector.Undo.Content"),
 			  MergeNone);
+	});
+
+	// Clock
+	clockGroup_ = new QWidget();
+	auto *clockForm = new QFormLayout(clockGroup_);
+	clockForm->setContentsMargins(0, 0, 0, 0);
+	clockMode_ = new QComboBox();
+	for (int i = 0; i <= (int)ClockMode::RecordTime; i++)
+		clockMode_->addItem(T(ClockModeTextKey((ClockMode)i)));
+	clockForm->addRow(T("Inspector.ClockMode"), clockMode_);
+	clockTarget_ = new QTimeEdit();
+	clockTarget_->setDisplayFormat(QStringLiteral("HH:mm:ss"));
+	clockForm->addRow(T("Inspector.ClockTarget"), clockTarget_);
+	v->addWidget(clockGroup_);
+	connect(clockMode_, QOverload<int>::of(&QComboBox::activated), this, [this](int idx) {
+		applyEdit([idx](WidgetConfig &w) { w.clockMode = (ClockMode)idx; }, T("Inspector.Undo.Clock"),
+			  MergeNone);
+	});
+	connect(clockTarget_, &QTimeEdit::timeChanged, this, [this](const QTime &time) {
+		applyEdit([time](WidgetConfig &w) { w.clockTarget = time; }, T("Inspector.Undo.Clock"),
+			  MergeClockTarget);
+	});
+
+	// Text
+	textGroup_ = new QWidget();
+	auto *textForm = new QFormLayout(textGroup_);
+	textForm->setContentsMargins(0, 0, 0, 0);
+	textEdit_ = new QPlainTextEdit();
+	textEdit_->setFixedHeight(90);
+	textForm->addRow(T("Inspector.Text"), textEdit_);
+	auto *fileRow = new QHBoxLayout();
+	textFile_ = new QLineEdit();
+	textFile_->setClearButtonEnabled(true);
+	textFile_->setPlaceholderText(T("Inspector.TextFilePlaceholder"));
+	auto *browse = new QPushButton(T("Inspector.Browse"));
+	fileRow->addWidget(textFile_, 1);
+	fileRow->addWidget(browse);
+	textForm->addRow(T("Inspector.TextFile"), fileRow);
+	v->addWidget(textGroup_);
+	connect(textEdit_, &QPlainTextEdit::textChanged, this, [this]() {
+		QString text = textEdit_->toPlainText();
+		applyEdit([text](WidgetConfig &w) { w.text = text; }, T("Inspector.Undo.Text"), MergeText);
+	});
+	auto setFile = [this](const QString &file) {
+		applyEdit([file](WidgetConfig &w) { w.textFile = file; }, T("Inspector.Undo.Text"), MergeNone);
+	};
+	connect(textFile_, &QLineEdit::editingFinished, this, [this, setFile]() {
+		if (!widgets_.isEmpty() && widgets_.first().textFile != textFile_->text())
+			setFile(textFile_->text());
+	});
+	connect(browse, &QPushButton::clicked, this, [this, setFile]() {
+		QString file = QFileDialog::getOpenFileName(this, T("Inspector.TextFile"), textFile_->text(),
+							    T("Inspector.TextFileFilter"));
+		if (!file.isEmpty())
+			setFile(file);
 	});
 
 	previewNote_ = makeDim(T("Inspector.PreviewNote"));
@@ -724,15 +783,19 @@ void CellInspector::populateTargets(WidgetType type)
 		targetCombo_->setItemData(targetCombo_->count() - 1, name, kNameRole);
 	};
 
-	if (type == WidgetType::Scene || type == WidgetType::Source) {
+	if (type == WidgetType::Scene || type == WidgetType::Source || type == WidgetType::AudioMeter) {
 		// Each entry carries the source's UUID so the cell keeps pointing at
 		// it through renames
-		QVector<QPair<QString, QString>> entries; // name, uuid
+		struct Entries {
+			QVector<QPair<QString, QString>> list; // name, uuid
+			uint32_t flag;                         // Output flag a source needs to be listed
+		} entries{{}, type == WidgetType::AudioMeter ? (uint32_t)OBS_SOURCE_AUDIO : (uint32_t)OBS_SOURCE_VIDEO};
 		auto add = [](void *param, obs_source_t *source) -> bool {
-			auto *list = static_cast<QVector<QPair<QString, QString>> *>(param);
+			auto *e = static_cast<Entries *>(param);
 			const char *name = obs_source_get_name(source);
-			if (name && (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO))
-				list->append({QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source))});
+			if (name && (obs_source_get_output_flags(source) & e->flag))
+				e->list.append(
+					{QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source))});
 			return true;
 		};
 		if (type == WidgetType::Scene) {
@@ -745,10 +808,10 @@ void CellInspector::populateTargets(WidgetType type)
 			obs_enum_sources(add, &entries);
 		}
 
-		std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+		std::sort(entries.list.begin(), entries.list.end(), [](const auto &a, const auto &b) {
 			return QString::compare(a.first, b.first, Qt::CaseInsensitive) < 0;
 		});
-		for (const auto &entry : entries)
+		for (const auto &entry : entries.list)
 			addItem(entry.first, entry.second, entry.first);
 	} else if (type == WidgetType::Canvas) {
 		addItem(T("CellDialog.MainCanvas"), QString(), QString());
@@ -848,7 +911,7 @@ void CellInspector::showSingle(const QString &title, const QString &subtitle)
 		btn->setChecked(true);
 
 	const bool needsTarget = w.type == WidgetType::Scene || w.type == WidgetType::Source ||
-				 w.type == WidgetType::Canvas;
+				 w.type == WidgetType::Canvas || w.type == WidgetType::AudioMeter;
 	targetCombo_->setVisible(needsTarget);
 	if (needsTarget) {
 		if (fresh || !populated_ || populatedType_ != w.type)
@@ -856,6 +919,24 @@ void CellInspector::showSingle(const QString &title, const QString &subtitle)
 		syncTarget(w);
 	} else {
 		populated_ = false;
+	}
+	clockGroup_->setVisible(w.type == WidgetType::Clock);
+	if (w.type == WidgetType::Clock) {
+		QSignalBlocker blockMode(clockMode_), blockTarget(clockTarget_);
+		clockMode_->setCurrentIndex((int)w.clockMode);
+		clockTarget_->setTime(w.clockTarget);
+		clockTarget_->setEnabled(w.clockMode == ClockMode::Countdown);
+	}
+	textGroup_->setVisible(w.type == WidgetType::Text);
+	if (w.type == WidgetType::Text) {
+		// Leave the text alone when equal, so typing keeps its cursor
+		if (textEdit_->toPlainText() != w.text) {
+			QSignalBlocker block(textEdit_);
+			textEdit_->setPlainText(w.text);
+		}
+		if (!textFile_->hasFocus())
+			textFile_->setText(w.textFile);
+		textEdit_->setEnabled(w.textFile.isEmpty());
 	}
 	previewNote_->setVisible(w.type == WidgetType::Preview);
 	noneNote_->setVisible(w.type == WidgetType::None);
@@ -872,7 +953,8 @@ void CellInspector::showSingle(const QString &title, const QString &subtitle)
 	}
 	setTextIfChanged(tallyCaption_, isScene ? T("Inspector.TallyCaption") : T("Inspector.TallyUnavailable"));
 
-	safeRow_->setVisible(w.type != WidgetType::None);
+	// Safe areas only apply to video content
+	safeRow_->setVisible(w.type >= WidgetType::Preview && w.type <= WidgetType::Source);
 	setTri(safeCheck_, w.safeRegion ? 1 : 0, 1);
 }
 

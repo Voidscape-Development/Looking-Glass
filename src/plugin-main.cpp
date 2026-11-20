@@ -17,6 +17,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "plugin.hpp"
+#include "api/hotkeys.hpp"
 #include "api/websocket-api.hpp"
 #include "core/config-manager.hpp"
 #include "render/live-state.hpp"
@@ -163,6 +164,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		// Drop the vendor requests while obs-websocket is still loaded; module
 		// unload order is not guaranteed, so it may be gone by obs_module_unload()
 		LookingGlassWebSocket::Unregister();
+		LookingGlassHotkeys::Shutdown();
 
 		// The collection, including which windows are open, was saved just
 		// before this event
@@ -186,6 +188,7 @@ bool obs_module_load(void)
 	// The save callback must be registered before the first scene collection
 	// loads, which happens after all modules are loaded
 	s_configManager->connectToFrontend();
+	LookingGlassHotkeys::Initialize();
 	obs_frontend_add_event_callback(on_frontend_event, nullptr);
 	ConnectSourceSignals(true);
 
