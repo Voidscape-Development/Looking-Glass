@@ -13,7 +13,7 @@ driven remotely over obs-websocket.
 * **Any number of multiviews.** Create, duplicate, rename, and delete as many layouts as you need.
 * **Freeform grids.** 1–16 rows by 1–16 columns, with cells merged into arbitrary rectangular spans.
 * **Mixed content per cell.** Program, studio-mode preview, any scene, any video source, a named canvas, an audio meter, a clock or timer, text notes, or a placeholder.
-* **Click to switch scenes.** Click a scene cell to send it to Preview (or straight to Program outside studio mode); double-click to take it to Program.
+* **Click to switch scenes.** Optionally, click a scene cell to send it to Preview (or straight to Program outside studio mode); double-click to take it to Program.
 * **Fully styled labels.** Per-cell text, font, size, background color and opacity, and nine-way alignment — rendered inside the OBS graphics pipeline and scaled with the cell like OBS's own multiview labels.
 * **Broadcast safe areas.** Optional EBU R 95 overlays (action safe, title safe, 4:3 inner safe, and a center crosshair) per cell.
 * **On-air tally.** Optional status border on scene cells: red for Program, green for Preview in studio mode.
@@ -196,13 +196,14 @@ reopens centered on the primary display.
 
 ### Switching Scenes from a Multiview
 
-Clicking a `Scene` cell switches scenes, as in OBS Studio's own multiview:
+Turn on **Click to Switch Scenes** in a window's right-click menu, and clicking a `Scene` cell
+switches scenes, as in OBS Studio's own multiview:
 
 * In studio mode, a click sends the scene to Preview and a double-click takes it to Program with the current transition.
 * Outside studio mode, a click switches Program to the scene.
 
-Turn it off per window with **Click to Switch Scenes** in the right-click menu, for walls that
-should only be looked at. The choice is saved with the window.
+It is off by default, so walls meant only to be looked at never change scenes by accident. The
+choice is saved with each window.
 
 ### Hotkeys
 

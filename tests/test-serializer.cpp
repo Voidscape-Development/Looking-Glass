@@ -49,7 +49,7 @@ MultiviewConfig SampleMultiview()
 	mv.window.screenIndex = 1;
 	mv.window.fullscreen = true;
 	mv.window.open = true;
-	mv.window.clickToSwitch = false;
+	mv.window.clickToSwitch = true;
 
 	CellConfig scene;
 	scene.row = 0;
@@ -188,7 +188,7 @@ private slots:
 		QCOMPARE(loaded.clockTarget, defaults.clockTarget);
 		QVERIFY(loaded.text.isEmpty());
 		QVERIFY(loaded.textFile.isEmpty());
-		QCOMPARE(MultiviewFromJson(Parse("{\"window\": {}}")).window.clickToSwitch, true);
+		QCOMPARE(MultiviewFromJson(Parse("{\"window\": {}}")).window.clickToSwitch, false);
 	}
 
 	void unknownValuesFallBack()

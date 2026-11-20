@@ -111,8 +111,8 @@ struct WindowState {
 	QString screenName;                          // Monitor used for fullscreen
 	int screenIndex = -1;                        // Fallback when the name is unknown
 	bool fullscreen = false;
-	bool open = false;         // Reopened when the scene collection loads
-	bool clickToSwitch = true; // Clicking a scene cell switches scenes
+	bool open = false;          // Reopened when the scene collection loads
+	bool clickToSwitch = false; // Clicking a scene cell switches scenes (opt-in)
 };
 
 // Complete layout definition for a multiview window

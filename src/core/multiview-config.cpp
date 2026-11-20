@@ -163,7 +163,7 @@ WindowState WindowFromJson(const QJsonObject &obj)
 	w.screenIndex = IntFromJson(obj, "screen_index", -1);
 	w.fullscreen = obj.value("fullscreen").toBool(false);
 	w.open = obj.value("open").toBool(false);
-	w.clickToSwitch = obj.value("click_to_switch").toBool(true);
+	w.clickToSwitch = obj.value("click_to_switch").toBool(false);
 	return w;
 }
 
