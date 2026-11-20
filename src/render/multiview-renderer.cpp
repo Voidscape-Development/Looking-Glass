@@ -22,7 +22,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "../plugin.hpp"
 
 #include <obs-module.h>
+#include <obs-audio-controls.h>
 #include <graphics/matrix4.h>
+#include <util/platform.h>
 
 #include <QFile>
 #include <QFont>
@@ -30,6 +32,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QImage>
 #include <QPainter>
 #include <QSvgRenderer>
+#include <QTime>
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +40,32 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <vector>
 
 // --- Frame: everything the graphics thread needs to draw one layout ---
+
+// Live levels of an audio source, written by the volmeter on the audio thread
+struct MultiviewRenderer::Meter {
+	obs_volmeter_t *volmeter = nullptr;
+	std::mutex mutex;
+	float magnitude[MAX_AUDIO_CHANNELS] = {};
+	float peak[MAX_AUDIO_CHANNELS] = {};
+	uint64_t updated = 0; // os_gettime_ns() of the last update
+
+	explicit Meter(obs_source_t *source) : volmeter(obs_volmeter_create(OBS_FADER_LOG))
+	{
+		obs_volmeter_add_callback(volmeter, Update, this);
+		obs_volmeter_attach_source(volmeter, source);
+	}
+	~Meter() { obs_volmeter_destroy(volmeter); } // Stops the callbacks
+
+	static void Update(void *data, const float magnitude[MAX_AUDIO_CHANNELS], const float peak[MAX_AUDIO_CHANNELS],
+			   const float[MAX_AUDIO_CHANNELS])
+	{
+		auto *self = static_cast<Meter *>(data);
+		std::lock_guard<std::mutex> lock(self->mutex);
+		std::copy(magnitude, magnitude + MAX_AUDIO_CHANNELS, self->magnitude);
+		std::copy(peak, peak + MAX_AUDIO_CHANNELS, self->peak);
+		self->updated = os_gettime_ns();
+	}
+};
 
 struct MultiviewRenderer::Cell {
 	CellConfig config;
@@ -47,6 +76,9 @@ struct MultiviewRenderer::Cell {
 	obs_weak_source_t *shown = nullptr;
 
 	obs_source_t *label = nullptr; // Private text source
+	obs_source_t *text = nullptr;  // Clock and Text cells: private text source for the content
+	QString clockText;             // UI thread: what text currently shows
+	std::unique_ptr<Meter> meter;  // Audio meter cells
 	std::string canvasName;
 
 	// Graphics thread cache, recreated when the cell's pixel size changes
@@ -83,12 +115,15 @@ struct MultiviewRenderer::Frame {
 
 		for (Cell &cell : cells) {
 			obs_source_release(cell.label);
+			obs_source_release(cell.text);
+			cell.meter.reset();
 
 			// The source may already be gone; its showing count died with it.
 			// hide callbacks run here, outside the graphics context.
 			obs_source_t *source = obs_weak_source_get_source(cell.shown);
 			if (source) {
-				obs_source_dec_showing(source);
+				if (cell.config.widget.type != WidgetType::AudioMeter)
+					obs_source_dec_showing(source);
 				obs_source_release(source);
 			}
 			obs_weak_source_release(cell.shown);
@@ -101,9 +136,13 @@ struct MultiviewRenderer::CellRect {
 	int y = 0;
 	int w = 0;
 	int h = 0;
+
+	bool contains(int px, int py) const { return px >= x && px < x + w && py >= y && py < y + h; }
 };
 
 namespace {
+
+using CellRect = MultiviewRenderer::CellRect;
 
 // OBS multiview-style status colors (ARGB)
 constexpr uint32_t kPreviewColor = 0xFF00D000;
@@ -124,6 +163,80 @@ constexpr float kLabelFontToCellHeight = 1.0f / 9.81f;
 // Labels are rasterized once at this font size and scaled when drawn. It sits
 // above the size labels usually end up at, so they are mostly scaled down.
 constexpr int kLabelRasterSize = 72;
+
+// Audio meter scale and zones, in dBFS, as in OBS Studio's mixer
+constexpr float kMeterMinDb = -60.0f;
+constexpr float kMeterYellowDb = -20.0f;
+constexpr float kMeterRedDb = -9.0f;
+constexpr uint64_t kMeterStaleNs = 300000000; // No update for this long reads as silence
+constexpr uint32_t kMeterColors[3] = {0xFF4CD94C, 0xFFE5D94C, 0xFFE54C4C};
+constexpr uint32_t kMeterDimColors[3] = {0xFF1E3D1E, 0xFF3D3A1E, 0xFF3D1E1E};
+
+// Where the grid sits in a target of totalW x totalH device pixels. Drawing and
+// click hit testing both use it, so clicks land on what is drawn.
+struct GridGeometry {
+	int inset = 1;
+	int offsetX = 0;
+	int offsetY = 0;
+	float cellW = 0.0f;
+	float cellH = 0.0f;
+	bool valid = false;
+
+	CellRect cellRect(const CellConfig &c) const
+	{
+		int x0 = (int)std::lround(c.col * cellW);
+		int x1 = (int)std::lround((c.col + c.colSpan) * cellW);
+		int y0 = (int)std::lround(c.row * cellH);
+		int y1 = (int)std::lround((c.row + c.rowSpan) * cellH);
+		return {offsetX + x0 + inset, offsetY + y0 + inset, (x1 - x0) - 2 * inset, (y1 - y0) - 2 * inset};
+	}
+};
+
+GridGeometry ComputeGeometry(int rows, int cols, int borderWidth, float ratio, int totalW, int totalH)
+{
+	GridGeometry g;
+	rows = std::max(1, rows);
+	cols = std::max(1, cols);
+	const int border = std::max(1, (int)std::lround(borderWidth * ratio));
+
+	// Grid lines are centered on cell boundaries, so the outer ones bleed
+	// half their width outward. Reserve room for that on every side.
+	const int outerHalf = (border + 1) / 2;
+	const int availableW = totalW - 2 * outerHalf;
+	const int availableH = totalH - 2 * outerHalf;
+	if (availableW <= 0 || availableH <= 0)
+		return g;
+
+	// Every cell keeps a 16:9 shape
+	float gridAspect = (float)(cols * 16) / (float)(rows * 9);
+	int gridW, gridH;
+	if ((float)availableW / (float)availableH > gridAspect) {
+		gridH = availableH;
+		gridW = (int)(gridH * gridAspect);
+	} else {
+		gridW = availableW;
+		gridH = (int)(gridW / gridAspect);
+	}
+
+	// Keep the leftover margin even so the grid centers exactly
+	if ((totalW - gridW) % 2 != 0)
+		gridW--;
+	if ((totalH - gridH) % 2 != 0)
+		gridH--;
+
+	// Cell boundaries are rounded individually from float sizes, spreading
+	// sub-pixel remainders across cells instead of into the margins
+	g.cellW = (float)gridW / cols;
+	g.cellH = (float)gridH / rows;
+	g.offsetX = (totalW - gridW) / 2;
+	g.offsetY = (totalH - gridH) / 2;
+
+	// Cells sit inside the grid lines. For a line of width W, floor(W/2) is
+	// the ideal inset, but never less than 1 so a 1px line stays visible.
+	g.inset = std::max(1, border / 2);
+	g.valid = true;
+	return g;
+}
 
 struct FitRect {
 	int x = 0;
@@ -243,12 +356,13 @@ const char *TextSourceId()
 #endif
 }
 
-// Private text source used to draw a cell label. The font contributes its
-// family and style; the size on screen is decided when drawing, relative to
-// the cell (see drawLabel()).
-obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
+// Private text source used to draw a cell label, clock, or text. The font
+// contributes its family and style; the size on screen is decided when
+// drawing, relative to the cell. With a file, the text is read from it and
+// follows its changes.
+obs_source_t *CreateTextSource(const QString &text, const QString &fontString, const QString &file = QString())
 {
-	if (text.isEmpty())
+	if (text.isEmpty() && file.isEmpty())
 		return nullptr;
 
 	QFont font;
@@ -279,6 +393,15 @@ obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
 	// White text with full opacity
 	obs_data_set_int(settings, "color1", 0xFFFFFFFF);
 	obs_data_set_int(settings, "color2", 0xFFFFFFFF);
+	if (!file.isEmpty()) {
+#ifdef _WIN32
+		obs_data_set_bool(settings, "read_from_file", true);
+		obs_data_set_string(settings, "file", file.toUtf8().constData());
+#else
+		obs_data_set_bool(settings, "from_file", true);
+		obs_data_set_string(settings, "text_file", file.toUtf8().constData());
+#endif
+	}
 	obs_data_release(fontData);
 
 	obs_source_t *source = obs_source_create_private(TextSourceId(), "lg_label", settings);
@@ -290,7 +413,7 @@ obs_source_t *CreateLabelSource(const QString &text, const QString &fontString)
 // layouts that predate UUIDs or came from another collection's template
 obs_source_t *ResolveSource(const WidgetConfig &w)
 {
-	if (w.type != WidgetType::Scene && w.type != WidgetType::Source)
+	if (w.type != WidgetType::Scene && w.type != WidgetType::Source && w.type != WidgetType::AudioMeter)
 		return nullptr;
 
 	obs_source_t *source = nullptr;
@@ -301,6 +424,38 @@ obs_source_t *ResolveSource(const WidgetConfig &w)
 	if (!source && !name.isEmpty())
 		source = obs_get_source_by_name(name.toUtf8().constData());
 	return source;
+}
+
+QString FormatDuration(qint64 secs)
+{
+	return QString::asprintf("%02lld:%02lld:%02lld", secs / 3600, secs / 60 % 60, secs % 60);
+}
+
+// What a Clock cell shows right now. UI thread (uses the frontend API).
+QString ClockText(const WidgetConfig &w)
+{
+	switch (w.clockMode) {
+	case ClockMode::Countdown: {
+		// Counts down to the target, then up past it
+		qint64 left = QTime::currentTime().secsTo(w.clockTarget);
+		return left >= 0 ? FormatDuration(left) : QStringLiteral("+") + FormatDuration(-left);
+	}
+	case ClockMode::StreamTime:
+	case ClockMode::RecordTime: {
+		// Frames output so far, which also leaves out recording pauses
+		obs_output_t *output = w.clockMode == ClockMode::StreamTime ? obs_frontend_get_streaming_output()
+									    : obs_frontend_get_recording_output();
+		QString text = QStringLiteral("--:--:--");
+		struct obs_video_info ovi;
+		if (output && obs_output_active(output) && obs_get_video_info(&ovi) && ovi.fps_num > 0)
+			text = FormatDuration((qint64)obs_output_get_total_frames(output) * ovi.fps_den / ovi.fps_num);
+		obs_output_release(output);
+		return text;
+	}
+	case ClockMode::TimeOfDay:
+	default:
+		return QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+	}
 }
 
 QString LabelText(const WidgetConfig &w, obs_source_t *resolved)
@@ -320,10 +475,15 @@ QString LabelText(const WidgetConfig &w, obs_source_t *resolved)
 		return w.canvasName.isEmpty() ? QString::fromUtf8(LG_TEXT("Renderer.Canvas")) : w.canvasName;
 	case WidgetType::Scene:
 	case WidgetType::Source:
+	case WidgetType::AudioMeter:
 		// Follow the live name so the label tracks renames
 		return resolved ? QString::fromUtf8(obs_source_get_name(resolved)) : w.targetName();
 	case WidgetType::Placeholder:
 		return QString::fromUtf8(LG_TEXT("Renderer.Placeholder"));
+	case WidgetType::Clock:
+		return QString::fromUtf8(obs_module_text(ClockModeTextKey(w.clockMode)));
+	case WidgetType::Text:
+		return QString::fromUtf8(LG_TEXT("Renderer.Text"));
 	default:
 		return QString();
 	}
@@ -378,6 +538,40 @@ void MultiviewRenderer::refreshSources()
 		setConfig(config_);
 }
 
+void MultiviewRenderer::tick()
+{
+	// Only the UI thread replaces frame_ or reads clockText
+	if (!frame_)
+		return;
+
+	for (Cell &cell : frame_->cells) {
+		if (cell.config.widget.type != WidgetType::Clock || !cell.text)
+			continue;
+		QString text = ClockText(cell.config.widget);
+		if (text == cell.clockText)
+			continue;
+		cell.clockText = text;
+		obs_data_t *settings = obs_data_create();
+		obs_data_set_string(settings, "text", text.toUtf8().constData());
+		obs_source_update(cell.text, settings);
+		obs_data_release(settings);
+	}
+}
+
+obs_source_t *MultiviewRenderer::sceneAt(int x, int y, int cx, int cy) const
+{
+	GridGeometry g = ComputeGeometry(config_.gridRows, config_.gridCols, config_.gridBorderWidth,
+					 pixelRatio_.load(), cx, cy);
+	if (!g.valid)
+		return nullptr;
+
+	for (const CellConfig &c : config_.cells) {
+		if (c.widget.type == WidgetType::Scene && g.cellRect(c).contains(x, y))
+			return ResolveSource(c.widget);
+	}
+	return nullptr;
+}
+
 void MultiviewRenderer::setPixelRatio(float ratio)
 {
 	pixelRatio_.store(ratio > 0.0f ? ratio : 1.0f);
@@ -399,7 +593,10 @@ std::unique_ptr<MultiviewRenderer::Frame> MultiviewRenderer::buildFrame(const Mu
 		const WidgetConfig &w = cell.config.widget;
 
 		obs_source_t *source = ResolveSource(w);
-		if (source) {
+		if (source && w.type == WidgetType::AudioMeter) {
+			cell.meter = std::make_unique<Meter>(source);
+			cell.shown = obs_source_get_weak_source(source);
+		} else if (source) {
 			// OBS only renders and captures a source while something
 			// declares it visible. Without this, a scene or source that is
 			// in neither program nor preview would freeze in its cell, the
@@ -408,7 +605,14 @@ std::unique_ptr<MultiviewRenderer::Frame> MultiviewRenderer::buildFrame(const Mu
 			cell.shown = obs_source_get_weak_source(source);
 		}
 
-		cell.label = CreateLabelSource(LabelText(w, source), w.labelFont);
+		if (w.type == WidgetType::Clock) {
+			cell.clockText = ClockText(w);
+			cell.text = CreateTextSource(cell.clockText, w.labelFont);
+		} else if (w.type == WidgetType::Text) {
+			cell.text = CreateTextSource(w.text, w.labelFont, w.textFile);
+		}
+
+		cell.label = CreateTextSource(LabelText(w, source), w.labelFont);
 		cell.canvasName = w.canvasName.toStdString();
 		obs_source_release(source);
 	}
@@ -444,69 +648,23 @@ void MultiviewRenderer::render(uint32_t cx, uint32_t cy)
 	if (!frame || cx == 0 || cy == 0)
 		return;
 
-	const int totalW = (int)cx;
-	const int totalH = (int)cy;
-	const float ratio = pixelRatio_.load();
-	const int border = std::max(1, (int)std::lround(frame->borderWidth * ratio));
-
-	// Grid lines are centered on cell boundaries, so the outer ones bleed
-	// half their width outward. Reserve room for that on every side.
-	const int outerHalf = (border + 1) / 2;
-	const int availableW = totalW - 2 * outerHalf;
-	const int availableH = totalH - 2 * outerHalf;
-	if (availableW <= 0 || availableH <= 0)
+	const GridGeometry g =
+		ComputeGeometry(frame->rows, frame->cols, frame->borderWidth, pixelRatio_.load(), (int)cx, (int)cy);
+	if (!g.valid)
 		return;
-
-	// Every cell keeps a 16:9 shape
-	float gridAspect = (float)(frame->cols * 16) / (float)(frame->rows * 9);
-	int gridW, gridH;
-	if ((float)availableW / (float)availableH > gridAspect) {
-		gridH = availableH;
-		gridW = (int)(gridH * gridAspect);
-	} else {
-		gridW = availableW;
-		gridH = (int)(gridW / gridAspect);
-	}
-
-	// Keep the leftover margin even so the grid centers exactly
-	if ((totalW - gridW) % 2 != 0)
-		gridW--;
-	if ((totalH - gridH) % 2 != 0)
-		gridH--;
-
-	// Cell boundaries are rounded individually from float sizes, spreading
-	// sub-pixel remainders across cells instead of into the margins
-	const float cellW = (float)gridW / frame->cols;
-	const float cellH = (float)gridH / frame->rows;
-	const int offsetX = (totalW - gridW) / 2;
-	const int offsetY = (totalH - gridH) / 2;
-
-	// Cells sit inside the grid lines. For a line of width W, floor(W/2) is
-	// the ideal inset, but never less than 1 so a 1px line stays visible.
-	const int inset = std::max(1, border / 2);
 
 	LiveState::Sources live;
 	LiveState::Acquire(live);
 
 	gs_viewport_push();
 	gs_projection_push();
-	gs_set_viewport(0, 0, totalW, totalH);
-	gs_ortho(0.0f, (float)totalW, 0.0f, (float)totalH, -100.0f, 100.0f);
+	gs_set_viewport(0, 0, (int)cx, (int)cy);
+	gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
 
-	drawGridLines(*frame, offsetX, offsetY, cellW, cellH, inset);
+	drawGridLines(*frame, g.offsetX, g.offsetY, g.cellW, g.cellH, g.inset);
 
 	for (Cell &cell : frame->cells) {
-		const CellConfig &c = cell.config;
-		int x0 = (int)std::lround(c.col * cellW);
-		int x1 = (int)std::lround((c.col + c.colSpan) * cellW);
-		int y0 = (int)std::lround(c.row * cellH);
-		int y1 = (int)std::lround((c.row + c.rowSpan) * cellH);
-
-		CellRect rect;
-		rect.x = offsetX + x0 + inset;
-		rect.y = offsetY + y0 + inset;
-		rect.w = (x1 - x0) - 2 * inset;
-		rect.h = (y1 - y0) - 2 * inset;
+		CellRect rect = g.cellRect(cell.config);
 		if (rect.w < 1 || rect.h < 1)
 			continue;
 
@@ -604,6 +762,15 @@ void MultiviewRenderer::drawCell(Cell &cell, const CellRect &rect, const LiveSta
 		break;
 	case WidgetType::Placeholder:
 		drawPlaceholder(cell, rect);
+		break;
+	case WidgetType::AudioMeter:
+		drawMeter(cell, rect);
+		break;
+	case WidgetType::Clock:
+		drawText(cell.text, rect, 0.45f, true);
+		break;
+	case WidgetType::Text:
+		drawText(cell.text, rect, 0.125f, false);
 		break;
 	case WidgetType::None:
 	default:
@@ -760,6 +927,85 @@ void MultiviewRenderer::drawLabel(Cell &cell, const CellRect &rect)
 	gs_matrix_scale3f(scale, scale, 1.0f);
 	obs_source_video_render(cell.label);
 	gs_matrix_pop();
+}
+
+// Text scaled to fit the cell, its font at most maxFontFraction of the cell's
+// height. Centered, or from the top-left corner.
+void MultiviewRenderer::drawText(obs_source_t *text, const CellRect &rect, float maxFontFraction, bool centered)
+{
+	uint32_t textW = text ? obs_source_get_width(text) : 0;
+	uint32_t textH = text ? obs_source_get_height(text) : 0;
+	if (textW == 0 || textH == 0)
+		return;
+
+	const int pad = std::max(1, rect.h / 20);
+	float scale = std::min({(float)(rect.w - 2 * pad) / textW, (float)(rect.h - 2 * pad) / textH,
+				rect.h * maxFontFraction / kLabelRasterSize});
+	if (scale <= 0.0f)
+		return;
+
+	int x = centered ? rect.x + (rect.w - (int)(textW * scale)) / 2 : rect.x + pad;
+	int y = centered ? rect.y + (rect.h - (int)(textH * scale)) / 2 : rect.y + pad;
+	gs_matrix_push();
+	gs_matrix_translate3f((float)x, (float)y, 0.0f);
+	gs_matrix_scale3f(scale, scale, 1.0f);
+	obs_source_video_render(text);
+	gs_matrix_pop();
+}
+
+// One bar per audio channel, green, yellow and red zones lit up to the current
+// level, with a tick at the peak. Horizontal in wide cells, vertical in tall ones.
+void MultiviewRenderer::drawMeter(const Cell &cell, const CellRect &rect)
+{
+	if (!cell.meter)
+		return;
+
+	float magnitude[MAX_AUDIO_CHANNELS];
+	float peak[MAX_AUDIO_CHANNELS];
+	{
+		std::lock_guard<std::mutex> lock(cell.meter->mutex);
+		bool stale = os_gettime_ns() - cell.meter->updated > kMeterStaleNs;
+		for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+			magnitude[i] = stale ? kMeterMinDb : cell.meter->magnitude[i];
+			peak[i] = stale ? kMeterMinDb : cell.meter->peak[i];
+		}
+	}
+
+	const int channels = std::clamp((int)audio_output_get_channels(obs_get_audio()), 1, MAX_AUDIO_CHANNELS);
+	const bool horizontal = rect.w >= rect.h;
+	const int length = (int)((horizontal ? rect.w : rect.h) * 0.9f);
+	const int across = (int)((horizontal ? rect.h : rect.w) * 0.6f);
+	const int gap = std::max(1, across / (channels * 8));
+	const int bar = std::max(1, (across - gap * (channels - 1)) / channels);
+	const int alongStart = horizontal ? rect.x + (rect.w - length) / 2 : rect.y + (rect.h + length) / 2;
+	const int acrossStart = horizontal ? rect.y + (rect.h - across) / 2 : rect.x + (rect.w - across) / 2;
+
+	auto position = [](float db) {
+		return std::isfinite(db) ? std::clamp((db - kMeterMinDb) / -kMeterMinDb, 0.0f, 1.0f) : 0.0f;
+	};
+	// Fills the part of channel ch between two positions (0-1) along the bar
+	auto fill = [&](int ch, float from, float to, uint32_t color) {
+		int a = (int)std::lround(from * length);
+		int b = (int)std::lround(to * length);
+		int c = acrossStart + ch * (bar + gap);
+		if (horizontal)
+			FillRect(alongStart + a, c, b - a, bar, color);
+		else
+			FillRect(c, alongStart - b, bar, b - a, color);
+	};
+
+	const float zones[4] = {0.0f, position(kMeterYellowDb), position(kMeterRedDb), 1.0f};
+	for (int ch = 0; ch < channels; ch++) {
+		float level = position(magnitude[ch]);
+		for (int z = 0; z < 3; z++) {
+			fill(ch, zones[z], zones[z + 1], kMeterDimColors[z]);
+			if (level > zones[z])
+				fill(ch, zones[z], std::min(level, zones[z + 1]), kMeterColors[z]);
+		}
+		float p = position(peak[ch]);
+		if (p > 0.0f)
+			fill(ch, std::max(0.0f, p - 0.01f), p, 0xFFFFFFFF);
+	}
 }
 
 void MultiviewRenderer::drawPlaceholder(Cell &cell, const CellRect &rect)

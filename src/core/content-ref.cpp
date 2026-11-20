@@ -38,6 +38,9 @@ const TypeName kTypeNames[] = {
 	{WidgetType::Scene, "scene"},
 	{WidgetType::Source, "source"},
 	{WidgetType::Placeholder, "placeholder"},
+	{WidgetType::AudioMeter, "audio_meter"},
+	{WidgetType::Clock, "clock"},
+	{WidgetType::Text, "text"},
 };
 
 } // namespace
@@ -104,6 +107,7 @@ void Apply(WidgetConfig &w, const ContentRef &ref)
 		w.sourceUuid = ref.uuid;
 		break;
 	case WidgetType::Source:
+	case WidgetType::AudioMeter:
 		w.sourceName = ref.name;
 		w.sourceUuid = ref.uuid;
 		break;
@@ -130,6 +134,7 @@ ContentRef FromWidget(const WidgetConfig &w)
 		ref.uuid = w.sourceUuid;
 		break;
 	case WidgetType::Source:
+	case WidgetType::AudioMeter:
 		ref.name = w.sourceName;
 		ref.uuid = w.sourceUuid;
 		break;

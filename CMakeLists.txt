@@ -39,6 +39,7 @@ target_sources(
   ${CMAKE_PROJECT_NAME}
   PRIVATE
     src/plugin-main.cpp
+    src/api/hotkeys.cpp
     src/api/websocket-api.cpp
     src/core/multiview-config.cpp
     src/core/grid-model.cpp

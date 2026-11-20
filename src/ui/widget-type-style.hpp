@@ -39,6 +39,12 @@ inline QColor WidgetTypeColor(WidgetType type)
 		return QColor(0xd0, 0x88, 0x3a);
 	case WidgetType::Canvas:
 		return QColor(0x3a, 0xa7, 0xc9);
+	case WidgetType::AudioMeter:
+		return QColor(0x9b, 0xc5, 0x3d);
+	case WidgetType::Clock:
+		return QColor(0xc9, 0x6b, 0xd0);
+	case WidgetType::Text:
+		return QColor(0xd4, 0xb8, 0x4a);
 	case WidgetType::Placeholder:
 	case WidgetType::None:
 	default:
@@ -61,6 +67,12 @@ inline QString WidgetTypeDisplayName(WidgetType type)
 		return QString::fromUtf8(LG_TEXT("CellDialog.TypeSource"));
 	case WidgetType::Placeholder:
 		return QString::fromUtf8(LG_TEXT("CellDialog.TypePlaceholder"));
+	case WidgetType::AudioMeter:
+		return QString::fromUtf8(LG_TEXT("CellDialog.TypeAudioMeter"));
+	case WidgetType::Clock:
+		return QString::fromUtf8(LG_TEXT("CellDialog.TypeClock"));
+	case WidgetType::Text:
+		return QString::fromUtf8(LG_TEXT("CellDialog.TypeText"));
 	case WidgetType::None:
 	default:
 		return QString::fromUtf8(LG_TEXT("CellDialog.TypeNone"));

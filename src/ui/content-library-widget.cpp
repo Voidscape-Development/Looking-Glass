@@ -366,9 +366,20 @@ void ContentLibraryWidget::refresh()
 		collect(&scenes, sceneList.sources.array[i]);
 	obs_frontend_source_list_free(&sceneList);
 	obs_enum_sources(collect, &sources);
-	std::sort(sources.begin(), sources.end(), [](const Entry &a, const Entry &b) {
+	auto collectAudio = [](void *param, obs_source_t *source) -> bool {
+		auto *list = static_cast<QVector<Entry> *>(param);
+		const char *name = obs_source_get_name(source);
+		if (name && (obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO))
+			list->append({QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source))});
+		return true;
+	};
+	QVector<Entry> audioSources;
+	obs_enum_sources(collectAudio, &audioSources);
+	auto byName = [](const Entry &a, const Entry &b) {
 		return QString::compare(a.name, b.name, Qt::CaseInsensitive) < 0;
-	});
+	};
+	std::sort(sources.begin(), sources.end(), byName);
+	std::sort(audioSources.begin(), audioSources.end(), byName);
 
 	QStringList canvasNames;
 	auto enumCanvasCb = [](void *param, obs_canvas_t *canvas) -> bool {
@@ -418,6 +429,10 @@ void ContentLibraryWidget::refresh()
 	for (const Entry &e : sources)
 		addItem(g, e.name, {WidgetType::Source, e.name, e.uuid});
 
+	g = addGroup("audio", "Library.GroupAudio");
+	for (const Entry &e : audioSources)
+		addItem(g, e.name, {WidgetType::AudioMeter, e.name, e.uuid});
+
 	g = addGroup("canvases", "Library.GroupCanvases");
 	addItem(g, QString::fromUtf8(LG_TEXT("CellDialog.MainCanvas")), {WidgetType::Canvas, QString(), QString()});
 	for (const QString &n : canvasNames)
@@ -425,6 +440,8 @@ void ContentLibraryWidget::refresh()
 
 	g = addGroup("other", "Library.GroupOther");
 	addItem(g, WidgetTypeDisplayName(WidgetType::Placeholder), {WidgetType::Placeholder, QString(), QString()});
+	addItem(g, WidgetTypeDisplayName(WidgetType::Clock), {WidgetType::Clock, QString(), QString()});
+	addItem(g, WidgetTypeDisplayName(WidgetType::Text), {WidgetType::Text, QString(), QString()});
 
 	for (int i = 0; i < tree_->topLevelItemCount(); i++) {
 		QTreeWidgetItem *group = tree_->topLevelItem(i);

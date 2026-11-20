@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QVector>
 #include <QRect>
 #include <QColor>
+#include <QTime>
 #include <QJsonObject>
 #include <Qt>
 
@@ -37,7 +38,25 @@ enum class WidgetType {
 	Scene,
 	Source,
 	Placeholder,
+	AudioMeter, // Level meter of an audio source (sourceName/sourceUuid)
+	Clock,
+	Text,
 };
+
+// What a Clock cell counts
+enum class ClockMode {
+	TimeOfDay,
+	Countdown,  // Time left until clockTarget, then time over it
+	StreamTime, // How long the stream has been live
+	RecordTime, // How long the recording has been running
+};
+
+// Locale key naming a clock mode
+inline const char *ClockModeTextKey(ClockMode mode)
+{
+	const char *const keys[] = {"Clock.TimeOfDay", "Clock.Countdown", "Clock.StreamTime", "Clock.RecordTime"};
+	return keys[(int)mode];
+}
 
 // Label size, as a percentage of the OBS multiview default. At 100% a label's
 // text is 1/9.81 of its cell's height, the proportion OBS Studio's own
@@ -66,6 +85,10 @@ struct WidgetConfig {
 	QColor labelBgColor = QColor(0, 0, 0, 128); // Label background color with alpha
 	bool safeRegion = false;                    // Draw broadcast safe area overlays
 	bool showStatus = false;                    // Show preview/program border indicator
+	ClockMode clockMode = ClockMode::TimeOfDay;
+	QTime clockTarget = QTime(0, 0); // Countdown target, time of day
+	QString text;                    // Text cells: the text shown
+	QString textFile;                // Text cells: file read live instead of text, when set
 
 	// Name of the scene or source this widget displays, if any
 	QString targetName() const;
@@ -88,7 +111,8 @@ struct WindowState {
 	QString screenName;                          // Monitor used for fullscreen
 	int screenIndex = -1;                        // Fallback when the name is unknown
 	bool fullscreen = false;
-	bool open = false; // Reopened when the scene collection loads
+	bool open = false;          // Reopened when the scene collection loads
+	bool clickToSwitch = false; // Clicking a scene cell switches scenes (opt-in)
 };
 
 // Complete layout definition for a multiview window

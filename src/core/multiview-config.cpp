@@ -31,6 +31,7 @@ QString WidgetConfig::targetName() const
 	case WidgetType::Scene:
 		return sceneName;
 	case WidgetType::Source:
+	case WidgetType::AudioMeter:
 		return sourceName;
 	default:
 		return QString();
@@ -44,41 +45,17 @@ constexpr int kMaxBorderWidth = 10;
 
 // --- String conversion helpers for enum serialization ---
 
-const char *WidgetTypeToString(WidgetType t)
-{
-	switch (t) {
-	case WidgetType::Preview:
-		return "preview";
-	case WidgetType::Program:
-		return "program";
-	case WidgetType::Canvas:
-		return "canvas";
-	case WidgetType::Scene:
-		return "scene";
-	case WidgetType::Source:
-		return "source";
-	case WidgetType::Placeholder:
-		return "placeholder";
-	default:
-		return "none";
-	}
-}
+const char *const kWidgetTypeNames[] = {"none",   "preview",     "program",     "canvas", "scene",
+					"source", "placeholder", "audio_meter", "clock",  "text"};
+const char *const kClockModeNames[] = {"time", "countdown", "stream", "record"};
 
-WidgetType StringToWidgetType(const QString &s)
+template<typename E, size_t N> E FromName(const QString &s, const char *const (&names)[N])
 {
-	if (s == QLatin1String("preview"))
-		return WidgetType::Preview;
-	if (s == QLatin1String("program"))
-		return WidgetType::Program;
-	if (s == QLatin1String("canvas"))
-		return WidgetType::Canvas;
-	if (s == QLatin1String("scene"))
-		return WidgetType::Scene;
-	if (s == QLatin1String("source"))
-		return WidgetType::Source;
-	if (s == QLatin1String("placeholder"))
-		return WidgetType::Placeholder;
-	return WidgetType::None;
+	for (size_t i = 0; i < N; i++) {
+		if (s == QLatin1String(names[i]))
+			return (E)i;
+	}
+	return (E)0;
 }
 
 const char *AlignHToString(Qt::Alignment a)
@@ -171,6 +148,7 @@ QJsonObject WindowToJson(const WindowState &w)
 	obj["screen_index"] = w.screenIndex;
 	obj["fullscreen"] = w.fullscreen;
 	obj["open"] = w.open;
+	obj["click_to_switch"] = w.clickToSwitch;
 	return obj;
 }
 
@@ -185,6 +163,7 @@ WindowState WindowFromJson(const QJsonObject &obj)
 	w.screenIndex = IntFromJson(obj, "screen_index", -1);
 	w.fullscreen = obj.value("fullscreen").toBool(false);
 	w.open = obj.value("open").toBool(false);
+	w.clickToSwitch = obj.value("click_to_switch").toBool(false);
 	return w;
 }
 
@@ -209,7 +188,7 @@ namespace MultiviewSerializer {
 QJsonObject WidgetToJson(const WidgetConfig &w)
 {
 	QJsonObject obj;
-	obj["type"] = WidgetTypeToString(w.type);
+	obj["type"] = kWidgetTypeNames[(int)w.type];
 	obj["scene_name"] = w.sceneName;
 	obj["source_name"] = w.sourceName;
 	obj["source_uuid"] = w.sourceUuid;
@@ -224,6 +203,10 @@ QJsonObject WidgetToJson(const WidgetConfig &w)
 	obj["label_bg_color"] = w.labelBgColor.name(QColor::HexArgb);
 	obj["safe_region"] = w.safeRegion;
 	obj["show_status"] = w.showStatus;
+	obj["clock_mode"] = kClockModeNames[(int)w.clockMode];
+	obj["clock_target"] = w.clockTarget.toString(Qt::ISODate);
+	obj["text"] = w.text;
+	obj["text_file"] = w.textFile;
 	return obj;
 }
 
@@ -233,7 +216,7 @@ WidgetConfig WidgetFromJson(const QJsonObject &obj)
 	// older versions (or edited by hand) load the way they were meant to
 	const WidgetConfig defaults;
 	WidgetConfig w;
-	w.type = StringToWidgetType(obj.value("type").toString());
+	w.type = FromName<WidgetType>(obj.value("type").toString(), kWidgetTypeNames);
 	w.sceneName = obj.value("scene_name").toString();
 	w.sourceName = obj.value("source_name").toString();
 	w.sourceUuid = obj.value("source_uuid").toString();
@@ -248,6 +231,11 @@ WidgetConfig WidgetFromJson(const QJsonObject &obj)
 	w.labelBgColor = ColorFromJson(obj.value("label_bg_color"), defaults.labelBgColor);
 	w.safeRegion = obj.value("safe_region").toBool(defaults.safeRegion);
 	w.showStatus = obj.value("show_status").toBool(defaults.showStatus);
+	w.clockMode = FromName<ClockMode>(obj.value("clock_mode").toString(), kClockModeNames);
+	QTime target = QTime::fromString(obj.value("clock_target").toString(), Qt::ISODate);
+	w.clockTarget = target.isValid() ? target : defaults.clockTarget;
+	w.text = obj.value("text").toString();
+	w.textFile = obj.value("text_file").toString();
 	return w;
 }
 

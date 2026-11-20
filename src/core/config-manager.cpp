@@ -547,7 +547,8 @@ void ConfigManager::onSourceRenamed(const QString &uuid, const QString &prevName
 
 		for (CellConfig &cell : mv.cells) {
 			WidgetConfig &w = cell.widget;
-			if (w.type != WidgetType::Scene && w.type != WidgetType::Source)
+			if (w.type != WidgetType::Scene && w.type != WidgetType::Source &&
+			    w.type != WidgetType::AudioMeter)
 				continue;
 			if (w.sourceUuid != uuid && w.targetName() != prevName)
 				continue;

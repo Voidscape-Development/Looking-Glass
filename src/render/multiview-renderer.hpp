@@ -63,6 +63,13 @@ public:
 	// resolves to a different source.
 	void refreshSources();
 
+	// UI thread: advance clock cells; call a few times a second
+	void tick();
+
+	// UI thread: the scene shown by the cell at (x, y) in a cx x cy target, in
+	// device pixels, or null. The caller releases the returned reference.
+	obs_source_t *sceneAt(int x, int y, int cx, int cy) const;
+
 	// Any thread: device pixels per logical pixel of the target window, used
 	// to keep grid lines and labels the same visual size on HiDPI screens
 	void setPixelRatio(float ratio);
@@ -70,10 +77,12 @@ public:
 	// obs_display draw callback; data is the MultiviewRenderer
 	static void Draw(void *data, uint32_t cx, uint32_t cy);
 
+	struct CellRect;
+
 private:
+	struct Meter;
 	struct Cell;
 	struct Frame;
-	struct CellRect;
 
 	std::unique_ptr<Frame> buildFrame(const MultiviewConfig &config) const;
 	void swapFrame(std::unique_ptr<Frame> next);
@@ -87,6 +96,8 @@ private:
 	void drawCanvas(const Cell &cell, const CellRect &rect);
 	void drawLabel(Cell &cell, const CellRect &rect);
 	void drawPlaceholder(Cell &cell, const CellRect &rect);
+	void drawText(obs_source_t *text, const CellRect &rect, float maxFontFraction, bool centered);
+	void drawMeter(const Cell &cell, const CellRect &rect);
 	void drawStatusBorder(const Cell &cell, obs_source_t *shown, const CellRect &rect,
 			      const LiveState::Sources &live);
 	void drawSafeAreas(uint32_t baseW, uint32_t baseH);

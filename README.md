@@ -12,13 +12,15 @@ driven remotely over obs-websocket.
 
 * **Any number of multiviews.** Create, duplicate, rename, and delete as many layouts as you need.
 * **Freeform grids.** 1–16 rows by 1–16 columns, with cells merged into arbitrary rectangular spans.
-* **Mixed content per cell.** Program, studio-mode preview, any scene, any video source, a named canvas, or a placeholder.
+* **Mixed content per cell.** Program, studio-mode preview, any scene, any video source, a named canvas, an audio meter, a clock or timer, text notes, or a placeholder.
+* **Click to switch scenes.** Optionally, click a scene cell to send it to Preview (or straight to Program outside studio mode); double-click to take it to Program.
 * **Fully styled labels.** Per-cell text, font, size, background color and opacity, and nine-way alignment — rendered inside the OBS graphics pipeline and scaled with the cell like OBS's own multiview labels.
 * **Broadcast safe areas.** Optional EBU R 95 overlays (action safe, title safe, 4:3 inner safe, and a center crosshair) per cell.
 * **On-air tally.** Optional status border on scene cells: red for Program, green for Preview in studio mode.
 * **Reusable templates.** Save any layout as a template shared across scene collections, with or without its exact source and scene names.
 * **Per-monitor window control.** Windowed, fullscreen on a specific monitor, or centered on the main display.
 * **State that sticks.** Geometry, monitor, fullscreen state, and which windows were open persist across scene collection switches and OBS restarts.
+* **Hotkeys.** Open, close, show/hide, and toggle fullscreen for each multiview from **Settings ▸ Hotkeys**.
 * **obs-websocket control.** Open, close, and send multiviews to the main display from outside OBS.
 
 ## Requirements
@@ -93,13 +95,31 @@ Each cell is assigned one widget type, either by dragging content onto it or fro
 | `Canvas` | The main canvas, or a specific named canvas |
 | `Scene` | A specific scene |
 | `Source` | A specific video source |
+| `Audio Meter` | Live level meter for an audio source, one bar per channel |
+| `Clock` | Time of day, a countdown to a set time, or how long the stream or recording has run |
+| `Text` | Your own text, typed in or read live from a file |
 | `Placeholder` | The Looking Glass icon, as a visual spacer |
+
+The content list offers audio sources under **Audio**, and the clock and text under **Other**.
 
 Content is scaled to fit its cell with the aspect ratio preserved and centered, so mixed
 cell shapes never distort the picture.
 
-`Scene` and `Source` cells follow their scene or source when it is renamed in OBS, and
+`Scene`, `Source` and `Audio Meter` cells follow their scene or source when it is renamed in OBS, and
 pick it up again if it is deleted and later recreated under the same name.
+
+**Audio Meter** cells show the same green, yellow and red zones as the OBS mixer (−60 to 0 dBFS,
+yellow from −20, red from −9), with a white tick at the peak. Bars run across wide cells and up tall ones.
+
+**Clock** cells show one of:
+
+* **Time of Day** — the current time, 24-hour.
+* **Countdown** — time left until a time of day you set, then time past it with a `+`.
+* **Stream Time** / **Recording Time** — how long the stream or recording has been running (`--:--:--` when it is not). Recording time leaves out pauses.
+
+**Text** cells show multi-line text typed into the inspector, or the contents of a text file,
+which updates on screen whenever the file changes — handy for producer notes or a rundown kept
+in another app. Clock and text cells use the cell's label font.
 
 Two per-cell toggles sit alongside the type:
 
@@ -165,14 +185,39 @@ Each multiview gets its own submenu under **Tools ▸ Looking Glass**:
 | **Windowed** | Leaves fullscreen and restores the last windowed geometry |
 
 Right-clicking inside a multiview window offers the same per-monitor fullscreen options,
-plus **Edit Multiview…** and **Close Multiview**. **Windowed** appears there only while the
-window is fullscreen.
+plus **Click to Switch Scenes**, **Edit Multiview…** and **Close Multiview**. **Windowed**
+appears there only while the window is fullscreen.
 
 Window state is saved as you move and resize. When you switch scene collections or restart
 OBS, the multiviews that were open reopen where you left them, on the monitor they were on,
 fullscreen if they were fullscreen. Monitors are remembered by name, so unplugging or
 reordering displays does not send a window to the wrong one; a window whose monitor is gone
 reopens centered on the primary display.
+
+### Switching Scenes from a Multiview
+
+Turn on **Click to Switch Scenes** in a window's right-click menu, and clicking a `Scene` cell
+switches scenes, as in OBS Studio's own multiview:
+
+* In studio mode, a click sends the scene to Preview and a double-click takes it to Program with the current transition.
+* Outside studio mode, a click switches Program to the scene.
+
+It is off by default, so walls meant only to be looked at never change scenes by accident. The
+choice is saved with each window.
+
+### Hotkeys
+
+Every multiview gets four hotkeys in **Settings ▸ Hotkeys**, named after it:
+
+| Hotkey | Effect |
+|---|---|
+| **Looking Glass: Open '\<name\>'** | Opens the window, or focuses it |
+| **Looking Glass: Close '\<name\>'** | Closes the window |
+| **Looking Glass: Show/Hide '\<name\>'** | Opens the window if it is closed, closes it if it is open |
+| **Looking Glass: Toggle Fullscreen '\<name\>'** | Goes fullscreen on the monitor the window is on, or back to windowed |
+
+Hotkeys follow their multiview through renames, and are removed with it. Bindings are saved in
+the scene collection, like the multiviews themselves.
 
 ## Controlling Multiviews from obs-websocket
 
@@ -269,8 +314,8 @@ Suggested reading from the plugin template wiki:
 |---|---|
 | `src/core/` | Layout data model and JSON serialization, grid operations (`GridModel`), and persistence (`ConfigManager`) |
 | `src/ui/` | Tools menu, grid editor, dialogs, and the multiview window with its OBS display |
-| `src/render/` | Grid rendering into a single OBS display per window, labels, safe areas, status borders |
-| `src/api/` | obs-websocket vendor requests |
+| `src/render/` | Grid rendering into a single OBS display per window, labels, safe areas, status borders, audio meters, clocks |
+| `src/api/` | obs-websocket vendor requests and hotkeys |
 | `deps/` | Vendored third-party headers (`obs-websocket-api.h`) |
 | `data/locale/` | Translatable UI strings |
 | `tests/` | Unit tests for the layout model, serialization, and grid operations |

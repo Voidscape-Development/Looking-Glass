@@ -26,10 +26,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QContextMenuEvent>
 #include <QGuiApplication>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QMoveEvent>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QShowEvent>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -80,6 +82,11 @@ MultiviewWindow::MultiviewWindow(const QString &id)
 	renderer_->setPixelRatio((float)devicePixelRatioF());
 	renderer_->setConfig(cm->getMultiview(id_));
 	setDrawCallback(&MultiviewRenderer::Draw, renderer_.get());
+
+	// Keeps clock cells current
+	auto *clockTimer = new QTimer(this);
+	connect(clockTimer, &QTimer::timeout, this, [this]() { renderer_->tick(); });
+	clockTimer->start(250);
 
 	updateTitle();
 	restoreWindowState(cm->windowState(id_));
@@ -271,6 +278,42 @@ void MultiviewWindow::onPixelSizeChanged()
 		renderer_->setPixelRatio((float)devicePixelRatioF());
 }
 
+void MultiviewWindow::mousePressEvent(QMouseEvent *event)
+{
+	MultiviewDisplay::mousePressEvent(event);
+	if (event->button() == Qt::LeftButton)
+		switchToSceneAt(event->position(), false);
+}
+
+void MultiviewWindow::mouseDoubleClickEvent(QMouseEvent *event)
+{
+	MultiviewDisplay::mouseDoubleClickEvent(event);
+	if (event->button() == Qt::LeftButton)
+		switchToSceneAt(event->position(), true);
+}
+
+void MultiviewWindow::switchToSceneAt(const QPointF &pos, bool doubleClick)
+{
+	if (!GetConfigManager()->windowState(id_).clickToSwitch)
+		return;
+
+	const qreal ratio = devicePixelRatioF();
+	const QSize size = this->size() * ratio;
+	obs_source_t *scene =
+		renderer_->sceneAt((int)(pos.x() * ratio), (int)(pos.y() * ratio), size.width(), size.height());
+	if (!scene)
+		return;
+
+	// Like OBS Studio's multiview: in studio mode a click previews the scene
+	// and a double click takes it to program; otherwise a click switches to it
+	const bool studio = obs_frontend_preview_program_mode_active();
+	if (studio && !doubleClick)
+		obs_frontend_set_current_preview_scene(scene);
+	else if (studio || !doubleClick)
+		obs_frontend_set_current_scene(scene);
+	obs_source_release(scene);
+}
+
 void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 {
 	QMenu menu(this);
@@ -292,6 +335,14 @@ void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 	}
 
 	menu.addSeparator();
+	QAction *clickAction = menu.addAction(LG_TEXT("WindowMenu.ClickToSwitch"));
+	clickAction->setCheckable(true);
+	clickAction->setChecked(GetConfigManager()->windowState(id_).clickToSwitch);
+	connect(clickAction, &QAction::toggled, this, [this](bool on) {
+		WindowState state = GetConfigManager()->windowState(id_);
+		state.clickToSwitch = on;
+		GetConfigManager()->setWindowState(id_, state);
+	});
 	menu.addAction(LG_TEXT("WindowMenu.EditMultiview"), this, &MultiviewWindow::openEditDialog);
 
 	menu.addSeparator();

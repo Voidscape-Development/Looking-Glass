@@ -82,6 +82,12 @@ QString DefaultLabel(const WidgetConfig &w)
 		return w.sourceName.isEmpty() ? QString(LG_TEXT("GridEditor.Source")) : w.sourceName;
 	case WidgetType::Placeholder:
 		return LG_TEXT("GridEditor.Placeholder");
+	case WidgetType::AudioMeter:
+		return w.sourceName.isEmpty() ? WidgetTypeDisplayName(w.type) : w.sourceName;
+	case WidgetType::Clock:
+		return obs_module_text(ClockModeTextKey(w.clockMode));
+	case WidgetType::Text:
+		return WidgetTypeDisplayName(w.type);
 	default:
 		return QString();
 	}
