@@ -19,6 +19,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include <QDialog>
+#include <QMessageBox>
+#include <QPointer>
 #include <QString>
 
 #include "../core/multiview-config.hpp"
@@ -58,6 +60,7 @@ private:
 	void onNameChanged();
 	void updateInfo();
 	bool hasUnsavedChanges() const;
+	void saveAndClose();
 
 	LayoutEditorWidget *layoutEditor_ = nullptr;
 	QLineEdit *nameEdit_ = nullptr;
@@ -69,4 +72,5 @@ private:
 	MultiviewConfig config_;
 	bool isNew_;
 	bool skipDiscardPrompt_ = false;
+	QPointer<QMessageBox> discardPrompt_;
 };

@@ -516,6 +516,7 @@ void ConfigManager::onSceneCollectionChanging()
 {
 	// The outgoing collection is saved after this event, from the data still
 	// held here; the incoming one replaces it when it loads
+	emit sceneCollectionChanging();
 	awaitingLoad_ = true;
 }
 
