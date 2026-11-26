@@ -254,7 +254,8 @@ void ConfigManager::setWindowState(const QString &id, const WindowState &state)
 	WindowState &current = it->window;
 	if (current.geometry == state.geometry && current.screenName == state.screenName &&
 	    current.screenIndex == state.screenIndex && current.fullscreen == state.fullscreen &&
-	    current.open == state.open && current.clickToSwitch == state.clickToSwitch)
+	    current.open == state.open && current.clickToSwitch == state.clickToSwitch &&
+	    current.hideCursor == state.hideCursor)
 		return;
 
 	current = state;

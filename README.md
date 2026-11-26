@@ -185,8 +185,9 @@ Each multiview gets its own submenu under **Tools ▸ Looking Glass**:
 | **Windowed** | Leaves fullscreen and restores the last windowed geometry |
 
 Right-clicking inside a multiview window offers the same per-monitor fullscreen options,
-plus **Click to Switch Scenes**, **Edit Multiview…** and **Close Multiview**. **Windowed**
-appears there only while the window is fullscreen.
+plus **Click to Switch Scenes**, **Hide Mouse Cursor**, **Edit Multiview…** and **Close Multiview**.
+**Windowed** appears there only while the window is fullscreen. **Hide Mouse Cursor** hides the
+pointer while it is over that multiview, and like the other window options is saved per multiview.
 
 Window state is saved as you move and resize. When you switch scene collections or restart
 OBS, the multiviews that were open reopen where you left them, on the monitor they were on,

@@ -86,6 +86,7 @@ private:
 	void openEditDialog();
 	void switchToSceneAt(const QPointF &pos, bool doubleClick);
 	void updateTitle();
+	void updateCursor();
 
 	QString id_;
 	std::unique_ptr<MultiviewRenderer> renderer_;

@@ -91,6 +91,7 @@ MultiviewWindow::MultiviewWindow(const QString &id)
 
 	updateTitle();
 	restoreWindowState(cm->windowState(id_));
+	updateCursor();
 
 	openWindows_[id_] = this;
 
@@ -349,14 +350,19 @@ void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 	}
 
 	menu->addSeparator();
-	QAction *clickAction = menu->addAction(LG_TEXT("WindowMenu.ClickToSwitch"));
-	clickAction->setCheckable(true);
-	clickAction->setChecked(GetConfigManager()->windowState(id_).clickToSwitch);
-	connect(clickAction, &QAction::toggled, this, [this](bool on) {
-		WindowState state = GetConfigManager()->windowState(id_);
-		state.clickToSwitch = on;
-		GetConfigManager()->setWindowState(id_, state);
-	});
+	auto addToggle = [this, menu](const char *key, bool WindowState::*field) {
+		QAction *action = menu->addAction(LG_TEXT(key));
+		action->setCheckable(true);
+		action->setChecked(GetConfigManager()->windowState(id_).*field);
+		connect(action, &QAction::toggled, this, [this, field](bool on) {
+			WindowState state = GetConfigManager()->windowState(id_);
+			state.*field = on;
+			GetConfigManager()->setWindowState(id_, state);
+			updateCursor();
+		});
+	};
+	addToggle("WindowMenu.ClickToSwitch", &WindowState::clickToSwitch);
+	addToggle("WindowMenu.HideCursor", &WindowState::hideCursor);
 	menu->addAction(LG_TEXT("WindowMenu.EditMultiview"), this, &MultiviewWindow::openEditDialog);
 
 	menu->addSeparator();
@@ -451,6 +457,14 @@ void MultiviewWindow::openEditDialog()
 	// the main window: this one can be deleted while the dialog is open
 	MultiviewEditDialog::launch(GetConfigManager()->getMultiview(id_), false,
 				    (QWidget *)obs_frontend_get_main_window());
+}
+
+void MultiviewWindow::updateCursor()
+{
+	if (GetConfigManager()->windowState(id_).hideCursor)
+		setCursor(Qt::BlankCursor);
+	else
+		unsetCursor();
 }
 
 void MultiviewWindow::updateTitle()

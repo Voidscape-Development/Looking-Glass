@@ -50,6 +50,7 @@ MultiviewConfig SampleMultiview()
 	mv.window.fullscreen = true;
 	mv.window.open = true;
 	mv.window.clickToSwitch = true;
+	mv.window.hideCursor = true;
 
 	CellConfig scene;
 	scene.row = 0;
@@ -158,6 +159,7 @@ private slots:
 		QCOMPARE(loaded.window.fullscreen, original.window.fullscreen);
 		QCOMPARE(loaded.window.open, original.window.open);
 		QCOMPARE(loaded.window.clickToSwitch, original.window.clickToSwitch);
+		QCOMPARE(loaded.window.hideCursor, original.window.hideCursor);
 		QCOMPARE(loaded.cells.size(), original.cells.size());
 		for (int i = 0; i < (int)original.cells.size(); i++) {
 			QCOMPARE(loaded.cells[i].row, original.cells[i].row);
@@ -189,6 +191,7 @@ private slots:
 		QVERIFY(loaded.text.isEmpty());
 		QVERIFY(loaded.textFile.isEmpty());
 		QCOMPARE(MultiviewFromJson(Parse("{\"window\": {}}")).window.clickToSwitch, false);
+		QCOMPARE(MultiviewFromJson(Parse("{\"window\": {}}")).window.hideCursor, false);
 	}
 
 	void unknownValuesFallBack()
