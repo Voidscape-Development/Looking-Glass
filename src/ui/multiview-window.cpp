@@ -194,8 +194,10 @@ void MultiviewWindow::restoreWindowState(const WindowState &state)
 
 	if (state.fullscreen) {
 		int screenIndex = FindScreen(state);
+		// Deferred until after show(): fullscreen requested on a window that has
+		// not been shown yet lands on the wrong monitor, framed
 		if (screenIndex >= 0)
-			setFullscreenOnMonitor(screenIndex);
+			QTimer::singleShot(0, this, [this, screenIndex]() { setFullscreenOnMonitor(screenIndex); });
 	}
 
 	restoring_ = false;
@@ -361,12 +363,14 @@ void MultiviewWindow::setFullscreenOnMonitor(int screenIndex)
 	if (!fullscreen_)
 		saveWindowState();
 
+	// Set first, so the moves below do not save the monitor rect as the
+	// windowed geometry
+	fullscreen_ = true;
 	QScreen *target = screens[screenIndex];
 	setScreen(target);
 	setGeometry(target->geometry());
 	showFullScreen();
 
-	fullscreen_ = true;
 	updateTitle();
 	saveWindowState();
 }
