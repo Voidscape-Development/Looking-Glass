@@ -248,6 +248,19 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 	});
 	connect(layoutEditor_, &LayoutEditorWidget::modifiedChanged, this, &MultiviewEditDialog::updateInfo);
 
+	// The layout belongs to the scene collection it was opened in: never save
+	// it into another one, or over a multiview deleted meanwhile
+	auto dismiss = [this]() {
+		skipDiscardPrompt_ = true;
+		reject();
+	};
+	ConfigManager *cm = GetConfigManager();
+	connect(cm, &ConfigManager::multiviewsReloaded, this, dismiss);
+	connect(cm, &ConfigManager::multiviewRemoved, this, [this, dismiss](const QString &id) {
+		if (!isNew_ && id == config_.id)
+			dismiss();
+	});
+
 	onNameChanged();
 	updateInfo();
 	if (isNew_) {
@@ -349,6 +362,13 @@ void MultiviewEditDialog::updateInfo()
 	else
 		infoLabel_->setText(hasUnsavedChanges() ? LG_TEXT("EditDialog.UnsavedChanges")
 							: LG_TEXT("EditDialog.NoChanges"));
+}
+
+void MultiviewEditDialog::launch(const MultiviewConfig &config, bool isNew, QWidget *parent)
+{
+	auto *dlg = new MultiviewEditDialog(config, isNew, parent);
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->open();
 }
 
 void MultiviewEditDialog::reject()

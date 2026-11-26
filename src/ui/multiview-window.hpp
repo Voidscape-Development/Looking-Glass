@@ -61,6 +61,9 @@ public:
 	static void closeAll(bool preserveOpenState);
 	static void reopenPreviouslyOpen();
 
+	// Closes every window, keeping them marked open, and opens none after
+	static void shutdown();
+
 	// Re-resolves the scenes and sources shown by every open window
 	static void refreshSources();
 
@@ -91,4 +94,5 @@ private:
 
 	static QMap<QString, MultiviewWindow *> openWindows_;
 	static bool preserveOpenStateOnClose_;
+	static bool shuttingDown_;
 };

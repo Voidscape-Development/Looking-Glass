@@ -126,8 +126,7 @@ void ManageMultiviewsDialog::onEdit()
 		return;
 
 	// An open window reloads through ConfigManager::multiviewUpdated
-	MultiviewEditDialog dlg(GetConfigManager()->getMultiview(id), false, this);
-	dlg.exec();
+	MultiviewEditDialog::launch(GetConfigManager()->getMultiview(id), false, this);
 }
 
 void ManageMultiviewsDialog::onRename()

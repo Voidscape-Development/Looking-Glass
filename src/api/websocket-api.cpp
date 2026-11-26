@@ -23,7 +23,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <cassert>
 #include <cstring>
+#include <condition_variable>
 #include <functional>
+#include <memory>
+#include <mutex>
 
 #include <obs.h>
 #include <obs-websocket-api.h>
@@ -50,30 +53,43 @@ void SetError(obs_data_t *response_data, const QString &message)
 	obs_data_set_string(response_data, "error", message.toUtf8().constData());
 }
 
-// Carries a callable across the obs_queue_task() C boundary
+// Shared between the requesting thread and the UI task, which can outlive the
+// request when it times out
 struct UiTask {
-	const std::function<void()> *fn;
-	bool ran;
+	std::function<void()> fn;
+	std::mutex mutex;
+	std::condition_variable done;
+	bool ran = false;
+	bool abandoned = false;
 };
 
 // Vendor request callbacks are invoked on an obs-websocket thread, but every
 // window operation below touches Qt widgets and must run on the UI thread.
-// Returns false when OBS has no UI task handler (e.g. a headless host), in
-// which case the task never ran.
+// Waits a few seconds at most, rather than forever, since at shutdown the UI
+// thread may never get to the task. Returns false when the task did not run.
 bool RunOnUiThread(const std::function<void()> &fn)
 {
-	UiTask task = {&fn, false};
+	auto task = std::make_shared<UiTask>();
+	task->fn = fn;
 
 	obs_queue_task(
 		OBS_TASK_UI,
 		[](void *param) {
-			auto *t = static_cast<UiTask *>(param);
-			t->ran = true;
-			(*t->fn)();
+			std::unique_ptr<std::shared_ptr<UiTask>> owner(static_cast<std::shared_ptr<UiTask> *>(param));
+			UiTask &t = **owner;
+			std::lock_guard lock(t.mutex);
+			if (t.abandoned)
+				return; // The request gave up; fn refers to its stack
+			t.fn();
+			t.ran = true;
+			t.done.notify_one();
 		},
-		&task, true);
+		new std::shared_ptr<UiTask>(task), false);
 
-	return task.ran;
+	std::unique_lock lock(task->mutex);
+	if (!task->done.wait_for(lock, std::chrono::seconds(5), [&]() { return task->ran; }))
+		task->abandoned = true;
+	return task->ran;
 }
 
 // Shared body for every request: pull the multiview name out of the payload,

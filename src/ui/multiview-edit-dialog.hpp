@@ -41,6 +41,10 @@ public:
 	explicit MultiviewEditDialog(const MultiviewConfig &config, bool isNew, QWidget *parent = nullptr);
 	MultiviewConfig result() const;
 
+	// Opens a dialog that deletes itself on close, without a nested event
+	// loop, so whatever opened it (a window, a menu) may be deleted meanwhile
+	static void launch(const MultiviewConfig &config, bool isNew, QWidget *parent);
+
 public slots:
 	void reject() override;
 
