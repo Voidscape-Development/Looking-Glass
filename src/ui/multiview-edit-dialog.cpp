@@ -248,6 +248,17 @@ MultiviewEditDialog::MultiviewEditDialog(const MultiviewConfig &config, bool isN
 	});
 	connect(layoutEditor_, &LayoutEditorWidget::modifiedChanged, this, &MultiviewEditDialog::updateInfo);
 
+	// The layout belongs to the scene collection it was opened in: saved there
+	// when it switches, and never over a multiview deleted meanwhile
+	ConfigManager *cm = GetConfigManager();
+	connect(cm, &ConfigManager::sceneCollectionChanging, this, &MultiviewEditDialog::saveAndClose);
+	connect(cm, &ConfigManager::multiviewRemoved, this, [this](const QString &id) {
+		if (isNew_ || id != config_.id)
+			return;
+		skipDiscardPrompt_ = true;
+		discardPrompt_ ? discardPrompt_->reject() : reject();
+	});
+
 	onNameChanged();
 	updateInfo();
 	if (isNew_) {
@@ -351,6 +362,13 @@ void MultiviewEditDialog::updateInfo()
 							: LG_TEXT("EditDialog.NoChanges"));
 }
 
+void MultiviewEditDialog::launch(const MultiviewConfig &config, bool isNew, QWidget *parent)
+{
+	auto *dlg = new MultiviewEditDialog(config, isNew, parent);
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->open();
+}
+
 void MultiviewEditDialog::reject()
 {
 	if (!skipDiscardPrompt_ && hasUnsavedChanges()) {
@@ -360,11 +378,38 @@ void MultiviewEditDialog::reject()
 		QPushButton *keep = box.addButton(LG_TEXT("EditDialog.KeepEditing"), QMessageBox::RejectRole);
 		box.setDefaultButton(keep);
 		box.setEscapeButton(keep);
+		discardPrompt_ = &box;
 		box.exec();
-		if (box.clickedButton() != discard)
+		// skipDiscardPrompt_ is set when the prompt was dismissed for us
+		if (!skipDiscardPrompt_ && box.clickedButton() != discard)
 			return;
 	}
 	QDialog::reject();
+}
+
+void MultiviewEditDialog::saveAndClose()
+{
+	// The scene collection is switching: keep the edits, without asking, in
+	// the outgoing collection, which OBS saves right after this
+	ConfigManager *cm = GetConfigManager();
+	QString name = nameEdit_->text().trimmed();
+	if (!isNew_ && (name.isEmpty() || cm->isNameTaken(name, config_.id)))
+		name = config_.name;
+	const QString base = name;
+	for (int n = 2; isNew_ && !name.isEmpty() && cm->isNameTaken(name); n++)
+		name = QStringLiteral("%1 (%2)").arg(base).arg(n);
+
+	if (hasUnsavedChanges() && !name.isEmpty() && (isNew_ || cm->hasMultiview(config_.id))) {
+		MultiviewConfig mv = result();
+		mv.name = name;
+		if (isNew_)
+			cm->addMultiview(mv);
+		else
+			cm->updateLayout(mv);
+	}
+
+	skipDiscardPrompt_ = true;
+	discardPrompt_ ? discardPrompt_->reject() : reject();
 }
 
 void MultiviewEditDialog::onConfirm()

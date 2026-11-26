@@ -160,7 +160,10 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		LiveState::Clear();
 		break;
 
-	case OBS_FRONTEND_EVENT_EXIT:
+	case OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN:
+		// OBS has saved everything and is about to destroy every source; by
+		// EXIT the windows would have rendered torn-down sources, and queued
+		// hotkeys could have reopened them.
 		// Drop the vendor requests while obs-websocket is still loaded; module
 		// unload order is not guaranteed, so it may be gone by obs_module_unload()
 		LookingGlassWebSocket::Unregister();
@@ -169,7 +172,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		// The collection, including which windows are open, was saved just
 		// before this event
 		s_configManager->onExit();
-		MultiviewWindow::closeAll(true);
+		MultiviewWindow::shutdown();
 		LiveState::Clear();
 		break;
 

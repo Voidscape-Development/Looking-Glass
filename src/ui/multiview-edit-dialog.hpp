@@ -19,6 +19,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #pragma once
 
 #include <QDialog>
+#include <QMessageBox>
+#include <QPointer>
 #include <QString>
 
 #include "../core/multiview-config.hpp"
@@ -41,6 +43,10 @@ public:
 	explicit MultiviewEditDialog(const MultiviewConfig &config, bool isNew, QWidget *parent = nullptr);
 	MultiviewConfig result() const;
 
+	// Opens a dialog that deletes itself on close, without a nested event
+	// loop, so whatever opened it (a window, a menu) may be deleted meanwhile
+	static void launch(const MultiviewConfig &config, bool isNew, QWidget *parent);
+
 public slots:
 	void reject() override;
 
@@ -54,6 +60,7 @@ private:
 	void onNameChanged();
 	void updateInfo();
 	bool hasUnsavedChanges() const;
+	void saveAndClose();
 
 	LayoutEditorWidget *layoutEditor_ = nullptr;
 	QLineEdit *nameEdit_ = nullptr;
@@ -65,4 +72,5 @@ private:
 	MultiviewConfig config_;
 	bool isNew_;
 	bool skipDiscardPrompt_ = false;
+	QPointer<QMessageBox> discardPrompt_;
 };

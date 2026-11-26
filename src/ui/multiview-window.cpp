@@ -38,6 +38,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 QMap<QString, MultiviewWindow *> MultiviewWindow::openWindows_;
 bool MultiviewWindow::preserveOpenStateOnClose_ = false;
+bool MultiviewWindow::shuttingDown_ = false;
 
 namespace {
 
@@ -90,6 +91,7 @@ MultiviewWindow::MultiviewWindow(const QString &id)
 
 	updateTitle();
 	restoreWindowState(cm->windowState(id_));
+	updateCursor();
 
 	openWindows_[id_] = this;
 
@@ -132,7 +134,7 @@ void MultiviewWindow::openOrFocus(const QString &id)
 		return;
 	}
 
-	if (!GetConfigManager()->hasMultiview(id))
+	if (shuttingDown_ || !GetConfigManager() || !GetConfigManager()->hasMultiview(id))
 		return;
 
 	auto *w = new MultiviewWindow(id);
@@ -166,6 +168,12 @@ void MultiviewWindow::closeAll(bool preserveOpenState)
 	preserveOpenStateOnClose_ = false;
 }
 
+void MultiviewWindow::shutdown()
+{
+	shuttingDown_ = true;
+	closeAll(true);
+}
+
 void MultiviewWindow::reopenPreviouslyOpen()
 {
 	for (const MultiviewConfig &mv : GetConfigManager()->multiviews()) {
@@ -194,8 +202,10 @@ void MultiviewWindow::restoreWindowState(const WindowState &state)
 
 	if (state.fullscreen) {
 		int screenIndex = FindScreen(state);
+		// Deferred until after show(): fullscreen requested on a window that has
+		// not been shown yet lands on the wrong monitor, framed
 		if (screenIndex >= 0)
-			setFullscreenOnMonitor(screenIndex);
+			QTimer::singleShot(0, this, [this, screenIndex]() { setFullscreenOnMonitor(screenIndex); });
 	}
 
 	restoring_ = false;
@@ -264,11 +274,13 @@ void MultiviewWindow::changeEvent(QEvent *event)
 	MultiviewDisplay::changeEvent(event);
 	if (event->type() == QEvent::WindowStateChange) {
 		bool nowFullscreen = windowState() & Qt::WindowFullScreen;
-		if (nowFullscreen != fullscreen_) {
-			fullscreen_ = nowFullscreen;
-			updateTitle();
-			saveWindowState();
-		}
+		if (nowFullscreen == fullscreen_)
+			return;
+		if (!nowFullscreen)
+			return setWindowed(); // Left fullscreen by the window manager
+		fullscreen_ = true;
+		updateTitle();
+		saveWindowState();
 	}
 }
 
@@ -316,39 +328,47 @@ void MultiviewWindow::switchToSceneAt(const QPointF &pos, bool doubleClick)
 
 void MultiviewWindow::contextMenuEvent(QContextMenuEvent *event)
 {
-	QMenu menu(this);
+	// popup(), not exec(): a nested event loop would return into a deleted
+	// window if a hotkey or a collection switch closes it meanwhile
+	auto *menu = new QMenu(this);
+	menu->setAttribute(Qt::WA_DeleteOnClose);
 
 	QList<QScreen *> screens = QGuiApplication::screens();
 	for (int i = 0; i < (int)screens.size(); i++) {
 		QString label = QString(LG_TEXT("ToolsMenu.FullscreenOn")).arg(screens[i]->name());
-		menu.addAction(label, this, [this, i]() { setFullscreenOnMonitor(i); });
+		menu->addAction(label, this, [this, i]() { setFullscreenOnMonitor(i); });
 	}
 
 	if (fullscreen_) {
-		menu.addSeparator();
-		menu.addAction(LG_TEXT("ToolsMenu.Windowed"), this, &MultiviewWindow::setWindowed);
+		menu->addSeparator();
+		menu->addAction(LG_TEXT("ToolsMenu.Windowed"), this, &MultiviewWindow::setWindowed);
 	}
 
 	if (!fullscreen_) {
-		menu.addSeparator();
-		menu.addAction(LG_TEXT("WindowMenu.FitToContent"), this, &MultiviewWindow::fitToContent);
+		menu->addSeparator();
+		menu->addAction(LG_TEXT("WindowMenu.FitToContent"), this, &MultiviewWindow::fitToContent);
 	}
 
-	menu.addSeparator();
-	QAction *clickAction = menu.addAction(LG_TEXT("WindowMenu.ClickToSwitch"));
-	clickAction->setCheckable(true);
-	clickAction->setChecked(GetConfigManager()->windowState(id_).clickToSwitch);
-	connect(clickAction, &QAction::toggled, this, [this](bool on) {
-		WindowState state = GetConfigManager()->windowState(id_);
-		state.clickToSwitch = on;
-		GetConfigManager()->setWindowState(id_, state);
-	});
-	menu.addAction(LG_TEXT("WindowMenu.EditMultiview"), this, &MultiviewWindow::openEditDialog);
+	menu->addSeparator();
+	auto addToggle = [this, menu](const char *key, bool WindowState::*field) {
+		QAction *action = menu->addAction(LG_TEXT(key));
+		action->setCheckable(true);
+		action->setChecked(GetConfigManager()->windowState(id_).*field);
+		connect(action, &QAction::toggled, this, [this, field](bool on) {
+			WindowState state = GetConfigManager()->windowState(id_);
+			state.*field = on;
+			GetConfigManager()->setWindowState(id_, state);
+			updateCursor();
+		});
+	};
+	addToggle("WindowMenu.ClickToSwitch", &WindowState::clickToSwitch);
+	addToggle("WindowMenu.HideCursor", &WindowState::hideCursor);
+	menu->addAction(LG_TEXT("WindowMenu.EditMultiview"), this, &MultiviewWindow::openEditDialog);
 
-	menu.addSeparator();
-	menu.addAction(LG_TEXT("WindowMenu.CloseMultiview"), this, &QWidget::close);
+	menu->addSeparator();
+	menu->addAction(LG_TEXT("WindowMenu.CloseMultiview"), this, &QWidget::close);
 
-	menu.exec(event->globalPos());
+	menu->popup(event->globalPos());
 }
 
 void MultiviewWindow::setFullscreenOnMonitor(int screenIndex)
@@ -361,22 +381,25 @@ void MultiviewWindow::setFullscreenOnMonitor(int screenIndex)
 	if (!fullscreen_)
 		saveWindowState();
 
+	// Set first, so the moves below do not save the monitor rect as the
+	// windowed geometry
+	fullscreen_ = true;
 	QScreen *target = screens[screenIndex];
 	setScreen(target);
 	setGeometry(target->geometry());
 	showFullScreen();
 
-	fullscreen_ = true;
 	updateTitle();
 	saveWindowState();
 }
 
 void MultiviewWindow::setWindowed()
 {
-	showNormal();
+	// Read before showNormal(), and fullscreen_ cleared first, so the events it
+	// sends cannot save the monitor rect over the windowed geometry
+	const QRect geometry = GetConfigManager()->windowState(id_).geometry;
 	fullscreen_ = false;
-
-	QRect geometry = GetConfigManager()->windowState(id_).geometry;
+	showNormal();
 	if (geometry.isValid())
 		setGeometry(geometry);
 
@@ -430,9 +453,18 @@ void MultiviewWindow::sendToMainDisplay()
 
 void MultiviewWindow::openEditDialog()
 {
-	// The window reloads through ConfigManager::multiviewUpdated
-	MultiviewEditDialog dlg(GetConfigManager()->getMultiview(id_), false, this);
-	dlg.exec();
+	// The window reloads through ConfigManager::multiviewUpdated. Parented to
+	// the main window: this one can be deleted while the dialog is open
+	MultiviewEditDialog::launch(GetConfigManager()->getMultiview(id_), false,
+				    (QWidget *)obs_frontend_get_main_window());
+}
+
+void MultiviewWindow::updateCursor()
+{
+	if (GetConfigManager()->windowState(id_).hideCursor)
+		setCursor(Qt::BlankCursor);
+	else
+		unsetCursor();
 }
 
 void MultiviewWindow::updateTitle()

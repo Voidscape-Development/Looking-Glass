@@ -63,14 +63,11 @@ void ToolsMenuManager::initialize()
 	submenu_ = new QMenu(LG_TEXT("LookingGlass"), toolsMenu);
 	toolsMenu->addMenu(submenu_);
 
+	// Rebuilt as it opens, never from a config signal: those can fire while
+	// one of the menu's own actions is still running (e.g. a rename from the
+	// Edit dialog), and deleting that action then would crash
 	rebuildMenu();
-
-	// Connect to ConfigManager signals
-	ConfigManager *cm = GetConfigManager();
-	connect(cm, &ConfigManager::multiviewAdded, this, &ToolsMenuManager::rebuildMenu);
-	connect(cm, &ConfigManager::multiviewRemoved, this, &ToolsMenuManager::rebuildMenu);
-	connect(cm, &ConfigManager::multiviewRenamed, this, &ToolsMenuManager::rebuildMenu);
-	connect(cm, &ConfigManager::multiviewsReloaded, this, &ToolsMenuManager::rebuildMenu);
+	connect(submenu_, &QMenu::aboutToShow, this, &ToolsMenuManager::rebuildMenu);
 }
 
 void ToolsMenuManager::rebuildMenu()
@@ -147,8 +144,7 @@ void ToolsMenuManager::rebuildMenu()
 void ToolsMenuManager::onCreateNew()
 {
 	QMainWindow *mainWindow = (QMainWindow *)obs_frontend_get_main_window();
-	MultiviewEditDialog dlg(MultiviewConfig(), true, mainWindow);
-	dlg.exec();
+	MultiviewEditDialog::launch(MultiviewConfig(), true, mainWindow);
 }
 
 void ToolsMenuManager::onManage()
@@ -179,8 +175,7 @@ void ToolsMenuManager::onEditMultiview(const QString &id)
 {
 	// An open window reloads through ConfigManager::multiviewUpdated
 	QMainWindow *mainWindow = (QMainWindow *)obs_frontend_get_main_window();
-	MultiviewEditDialog dlg(GetConfigManager()->getMultiview(id), false, mainWindow);
-	dlg.exec();
+	MultiviewEditDialog::launch(GetConfigManager()->getMultiview(id), false, mainWindow);
 }
 
 void ToolsMenuManager::onSendToMainDisplay(const QString &id)

@@ -67,6 +67,39 @@ struct MultiviewRenderer::Meter {
 	}
 };
 
+// Graphics thread: a texture rasterized at one pixel size. While the size keeps
+// changing (a live resize, a DPI change) the old texture is drawn stretched,
+// and it is rasterized again once the size has held for a moment: one rebuild
+// per resize rather than one per frame on the thread OBS renders output on.
+struct CachedTexture {
+	gs_texture_t *tex = nullptr;
+	int w = 0, h = 0;         // Size rasterized at
+	int wantW = 0, wantH = 0; // Size last asked for
+	uint64_t wantSince = 0;
+
+	bool needsRebuild(int nw, int nh)
+	{
+		if (tex && nw == w && nh == h)
+			return false;
+		const uint64_t now = os_gettime_ns();
+		if (nw != wantW || nh != wantH) {
+			wantW = nw;
+			wantH = nh;
+			wantSince = now;
+		}
+		return !tex || now - wantSince >= 150000000ULL;
+	}
+
+	void set(gs_texture_t *texture, int nw, int nh)
+	{
+		if (tex)
+			gs_texture_destroy(tex);
+		tex = texture;
+		w = nw;
+		h = nh;
+	}
+};
+
 struct MultiviewRenderer::Cell {
 	CellConfig config;
 
@@ -82,11 +115,8 @@ struct MultiviewRenderer::Cell {
 	std::string canvasName;
 
 	// Graphics thread cache, recreated when the cell's pixel size changes
-	gs_texture_t *labelBg = nullptr;
-	int labelBgW = 0;
-	int labelBgH = 0;
-	gs_texture_t *placeholder = nullptr;
-	int placeholderSize = 0;
+	CachedTexture labelBg;
+	CachedTexture placeholder;
 };
 
 struct MultiviewRenderer::Frame {
@@ -106,10 +136,8 @@ struct MultiviewRenderer::Frame {
 	{
 		obs_enter_graphics();
 		for (Cell &cell : cells) {
-			if (cell.labelBg)
-				gs_texture_destroy(cell.labelBg);
-			if (cell.placeholder)
-				gs_texture_destroy(cell.placeholder);
+			cell.labelBg.set(nullptr, 0, 0);
+			cell.placeholder.set(nullptr, 0, 0);
 		}
 		obs_leave_graphics();
 
@@ -436,8 +464,12 @@ QString ClockText(const WidgetConfig &w)
 {
 	switch (w.clockMode) {
 	case ClockMode::Countdown: {
-		// Counts down to the target, then up past it
+		// Counts down to the target's nearest occurrence, then up past it
 		qint64 left = QTime::currentTime().secsTo(w.clockTarget);
+		if (left > 43200)
+			left -= 86400;
+		else if (left < -43200)
+			left += 86400;
 		return left >= 0 ? FormatDuration(left) : QStringLiteral("+") + FormatDuration(-left);
 	}
 	case ClockMode::StreamTime:
@@ -910,16 +942,10 @@ void MultiviewRenderer::drawLabel(Cell &cell, const CellRect &rect)
 		int bgW = scaledW + 2 * bgPad;
 		int bgH = scaledH + 2 * bgPad;
 
-		if (!cell.labelBg || cell.labelBgW != bgW || cell.labelBgH != bgH) {
-			if (cell.labelBg)
-				gs_texture_destroy(cell.labelBg);
-			cell.labelBg = CreateRoundedRectTexture(bgW, bgH, bgRadius, w.labelBgColor);
-			cell.labelBgW = bgW;
-			cell.labelBgH = bgH;
-		}
-
-		if (cell.labelBg)
-			DrawTexture(cell.labelBg, labelX - bgPad, labelY - bgPad, bgW, bgH);
+		if (cell.labelBg.needsRebuild(bgW, bgH))
+			cell.labelBg.set(CreateRoundedRectTexture(bgW, bgH, bgRadius, w.labelBgColor), bgW, bgH);
+		if (cell.labelBg.tex)
+			DrawTexture(cell.labelBg.tex, labelX - bgPad, labelY - bgPad, bgW, bgH);
 	}
 
 	gs_matrix_push();
@@ -1013,17 +1039,13 @@ void MultiviewRenderer::drawPlaceholder(Cell &cell, const CellRect &rect)
 	if (placeholderSvg_.isEmpty())
 		return;
 
-	// Half the cell's shorter side, rasterized at exactly that size
+	// Half the cell's shorter side, rasterized at that size once it settles
 	int size = std::max(16, std::min(rect.w, rect.h) / 2);
-	if (!cell.placeholder || cell.placeholderSize != size) {
-		if (cell.placeholder)
-			gs_texture_destroy(cell.placeholder);
-		cell.placeholder = CreateSvgTexture(placeholderSvg_, size);
-		cell.placeholderSize = size;
-	}
-
-	if (cell.placeholder)
-		DrawTexture(cell.placeholder, rect.x + (rect.w - size) / 2, rect.y + (rect.h - size) / 2, size, size);
+	if (cell.placeholder.needsRebuild(size, size))
+		cell.placeholder.set(CreateSvgTexture(placeholderSvg_, size), size, size);
+	if (cell.placeholder.tex)
+		DrawTexture(cell.placeholder.tex, rect.x + (rect.w - size) / 2, rect.y + (rect.h - size) / 2, size,
+			    size);
 }
 
 void MultiviewRenderer::drawStatusBorder(const Cell &cell, obs_source_t *shown, const CellRect &rect,

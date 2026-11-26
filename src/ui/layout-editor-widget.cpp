@@ -61,7 +61,9 @@ bool WidgetsEqual(const WidgetConfig &a, const WidgetConfig &b)
 	       a.sourceUuid == b.sourceUuid && a.placeholderPath == b.placeholderPath && a.canvasName == b.canvasName &&
 	       a.labelVisible == b.labelVisible && a.labelHAlign == b.labelHAlign && a.labelVAlign == b.labelVAlign &&
 	       a.labelText == b.labelText && a.labelFont == b.labelFont && a.labelSize == b.labelSize &&
-	       a.labelBgColor == b.labelBgColor && a.safeRegion == b.safeRegion && a.showStatus == b.showStatus;
+	       a.labelBgColor == b.labelBgColor && a.safeRegion == b.safeRegion && a.showStatus == b.showStatus &&
+	       a.clockMode == b.clockMode && a.clockTarget == b.clockTarget && a.text == b.text &&
+	       a.textFile == b.textFile;
 }
 
 bool CellsEqual(const QVector<CellConfig> &a, const QVector<CellConfig> &b)
@@ -234,6 +236,9 @@ void LayoutEditorWidget::buildToolbar()
 	colsSpin_->setRange(GridModel::kMinGridSize, GridModel::kMaxGridSize);
 	colsSpin_->setPrefix(LG_TEXT("LayoutEditor.ColumnsPrefix"));
 	colsSpin_->setToolTip(LG_TEXT("LayoutEditor.ColumnsTip"));
+	// Typing "12" must not resize to 1 row on the way, dropping cells
+	rowsSpin_->setKeyboardTracking(false);
+	colsSpin_->setKeyboardTracking(false);
 	toolbar_->addWidget(colsSpin_);
 
 	toolbar_->addSeparator();

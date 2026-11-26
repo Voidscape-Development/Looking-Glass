@@ -109,6 +109,8 @@ signals:
 	void multiviewRenamed(const QString &id);
 	void multiviewUpdated(const QString &id);
 	void multiviewsReloaded();
+	// The scene collection is about to switch; it is saved right after
+	void sceneCollectionChanging();
 	void templatesChanged();
 
 private:

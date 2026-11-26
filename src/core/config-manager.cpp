@@ -62,9 +62,14 @@ QJsonObject ReadJsonFile(const QString &path)
 
 	QJsonParseError error;
 	QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &error);
-	if (error.error != QJsonParseError::NoError) {
-		obs_log(LOG_WARNING, "could not parse %s: %s", path.toUtf8().constData(),
-			error.errorString().toUtf8().constData());
+	if (error.error != QJsonParseError::NoError || !doc.isObject()) {
+		// Moved aside, so the next save cannot overwrite what is in it
+		const QString invalid = path + QStringLiteral(".invalid");
+		obs_log(LOG_WARNING, "could not parse %s (%s), moved to %s", path.toUtf8().constData(),
+			error.errorString().toUtf8().constData(), invalid.toUtf8().constData());
+		file.close();
+		QFile::remove(invalid);
+		QFile::rename(path, invalid);
 		return QJsonObject();
 	}
 	return doc.object();
@@ -249,7 +254,8 @@ void ConfigManager::setWindowState(const QString &id, const WindowState &state)
 	WindowState &current = it->window;
 	if (current.geometry == state.geometry && current.screenName == state.screenName &&
 	    current.screenIndex == state.screenIndex && current.fullscreen == state.fullscreen &&
-	    current.open == state.open)
+	    current.open == state.open && current.clickToSwitch == state.clickToSwitch &&
+	    current.hideCursor == state.hideCursor)
 		return;
 
 	current = state;
@@ -511,6 +517,7 @@ void ConfigManager::onSceneCollectionChanging()
 {
 	// The outgoing collection is saved after this event, from the data still
 	// held here; the incoming one replaces it when it loads
+	emit sceneCollectionChanging();
 	awaitingLoad_ = true;
 }
 

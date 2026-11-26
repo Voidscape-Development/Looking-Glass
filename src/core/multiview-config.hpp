@@ -113,6 +113,7 @@ struct WindowState {
 	bool fullscreen = false;
 	bool open = false;          // Reopened when the scene collection loads
 	bool clickToSwitch = false; // Clicking a scene cell switches scenes (opt-in)
+	bool hideCursor = false;    // The mouse pointer is hidden over the window
 };
 
 // Complete layout definition for a multiview window

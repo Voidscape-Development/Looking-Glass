@@ -149,6 +149,7 @@ QJsonObject WindowToJson(const WindowState &w)
 	obj["fullscreen"] = w.fullscreen;
 	obj["open"] = w.open;
 	obj["click_to_switch"] = w.clickToSwitch;
+	obj["hide_cursor"] = w.hideCursor;
 	return obj;
 }
 
@@ -164,6 +165,7 @@ WindowState WindowFromJson(const QJsonObject &obj)
 	w.fullscreen = obj.value("fullscreen").toBool(false);
 	w.open = obj.value("open").toBool(false);
 	w.clickToSwitch = obj.value("click_to_switch").toBool(false);
+	w.hideCursor = obj.value("hide_cursor").toBool(false);
 	return w;
 }
 
